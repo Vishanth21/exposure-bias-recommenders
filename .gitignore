@@ -1,0 +1,14 @@
+data/raw/
+data/processed/
+data/*.zip
+
+# ---- generated results & figures ----
+results/*.parquet
+results/*.csv
+figures/*.png
+figures/*.pdf
+
+# ---- python ----
+.venv/
+venv/
+__pycache__/
