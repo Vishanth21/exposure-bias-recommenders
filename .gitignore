@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Pytest / Cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Project data & results (as per plan Section 7.2)
+data/
+results/
+scratch/
+*.npz
+*.parquet
+*.pkl
