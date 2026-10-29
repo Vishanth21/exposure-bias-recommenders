@@ -1,3 +1,19 @@
+# Data
+data/
+data/raw/
+data/processed/
+data/*.zip
+
+# Generated results, figures & scratch
+results/
+scratch/
+figures/*.png
+figures/*.pdf
+*.npz
+*.parquet
+*.pkl
+*.csv
+
 # Python
 __pycache__/
 *.py[cod]
@@ -12,11 +28,3 @@ venv/
 .pytest_cache/
 .coverage
 htmlcov/
-
-# Project data & results (as per plan Section 7.2)
-data/
-results/
-scratch/
-*.npz
-*.parquet
-*.pkl
