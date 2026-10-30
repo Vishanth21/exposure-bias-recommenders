@@ -212,3 +212,4 @@ def load_metadata(category: str = "Electronics", limit: int | None = None) -> pd
     df["price"] = df["price"].astype(np.float32)
 
     return df
+
