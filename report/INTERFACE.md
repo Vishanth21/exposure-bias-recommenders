@@ -25,7 +25,7 @@
 | Training population | **No filter.** ALS trains on every user and every item with at least one positive — single-interaction users still inform item factors. |
 | Catalogue | Items with **`>= 3` train interactions** are *recommendable*. Items below that are trained on but never recommended: their factors are near-random and would inflate coverage and Gini with noise. Sensitivity at 1 and 5. |
 | Evaluation populations | **Exposure pop:** users with `>= 1` train positive (exposure needs no ground truth). **Relevance pop:** users with `>= 2` train positives. Both from the same split; see §3. |
-| Excluded candidates | Every item the user has already rated is removed from their candidates, **including low-rated ones** — a rated item is observed, not a recommendation opportunity. |
+| Excluded candidates | Training positives and non-positive observations are removed from candidates, **including low-rated ones**. The held-out test positive remains eligible so relevance metrics can rank it. Test items outside the catalogue are excluded and counted in the funnel. |
 | Split | Temporal leave-last-out per user: the **last positive** (`rating >= 4`) → `test`, all earlier positives → `train`. Ties broken by `timestamp`, then `itemId` for determinism. |
 | Candidate set | Catalogue items (`>= 3` train interactions) minus the user's own rated items. Test items outside the catalogue are **excluded**, and the dropped fraction is reported. |
 | Seeds | `random.seed(42)`, `np.random.seed(42)`, ALS `random_state=42`. |
@@ -50,8 +50,11 @@ so a smoke run is deterministic. Extra Amazon columns may be present; consumers 
 ```python
 def load_metadata(category: str = "Electronics", limit: int | None = None) -> pd.DataFrame
 ```
-Returns one row per `parent_asin` with `parent_asin:str`, `title:str`, `store:str`.
-`store` is normalised here, not downstream: missing / `None` / `"None"` / empty → `""`.
+Returns one row per `parent_asin` with `parent_asin:str`, `title:str`, `store:str`,
+`main_category:str`, `price:float32`. `store` is normalised here, not downstream: missing /
+`None` / `"None"` / empty → `""`. `price` is `NaN` when missing or unparseable; the item is
+kept, because a missing price is the common case and dropping on it would remove most of the
+catalogue. `title` and `main_category` are `""` when missing.
 
 ```python
 def extract_store(meta: pd.DataFrame) -> pd.Series
@@ -78,13 +81,13 @@ Exists so `01_prepare.py` and the integration tests normalise identically.
 | `rating` | float32 | 1.0–5.0 |
 | `timestamp` | int64 | **epoch milliseconds** (Amazon gives ms — do not treat as seconds) |
 | `split` | string | `"train"` \| `"test"` \| `"seen"` |
-| `seen` | bool | `True` for every row the user rated, positive or not — the candidate-exclusion mask |
+| `seen` | bool | `True` for every row the user rated, positive or not; candidate generation excludes non-test rows |
 
 **Non-positives (`rating < 4`) are never `train` or `test`.** They carry `split = "seen"` and
-`seen = True`, and exist for exactly one purpose: excluding every item the user has already
-rated from their candidate list, since a rated item is observed rather than a recommendation
-opportunity. They contribute no training signal and no ground truth. Every positive row also
-carries `seen = True`.
+`seen = True`, and exist for exactly one purpose: excluding every previously rated item except
+the held-out test positive from a user's candidates. They contribute no training signal and no
+ground truth. Every positive row also carries `seen = True`; the held-out test row is not
+treated as known during ranking, so it remains eligible for relevance evaluation.
 
 **No user or item is dropped at this stage.** Every user with at least one positive gets a
 `test` row (their last positive) and their remaining positives as `train`. Users with zero
@@ -239,8 +242,8 @@ much catalogue actually survived to be protected.
     {"stage": "non_positives_seen", "users": 0, "items": 0, "interactions": 0},
     {"stage": "after_split",        "users": 0, "items": 0, "interactions": 0},
     {"stage": "catalogue_ge_3",     "users": 0, "items": 0, "interactions": 0},
-    {"stage": "eval_exposure_pop",  "users": 0, "items": 0, "interactions": 0},
-    {"stage": "eval_relevance_pop", "users": 0, "items": 0, "interactions": 0}
+    {"stage": "eval_exposure_pop",  "users": 0, "sampled_users": 0, "items": 0, "interactions": 0},
+    {"stage": "eval_relevance_pop", "users": 0, "sampled_users": 0, "items": 0, "interactions": 0}
   ],
   "positive_fraction": 0.0,
   "store_null_rate": 0.0,
@@ -262,6 +265,9 @@ much catalogue actually survived to be protected.
 `store_share` per bucket before trusting any seller result. If `large.n_stores` is very small
 (< ~100) or `small.store_share` exceeds ~95%, the rule has collapsed and the definition must be
 switched to a fixed store percentile — see the store bucket rule above.
+
+For the two evaluation stages, `users` is the eligible population and `sampled_users` is the
+fixed-seed sample size, capped at 300,000. Other stages omit `sampled_users`.
 
 `positive_fraction` decides whether the threshold is doing work. `store_null_rate` decides how
 strong the seller claim can be. `test_items_outside_catalogue_frac` bounds how much recall is

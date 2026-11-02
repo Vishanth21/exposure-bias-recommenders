@@ -1,34 +1,20 @@
-"""
-03_evaluate.py: Evaluation of baseline ALS model and reference baselines (MostPop & Random).
-
-Produces:
-- results/baseline_metrics.json
-
-Conforms to report/INTERFACE.md §3 and §4.
-"""
+"""Stage 03 — score ALS and reference recommenders for the evaluation populations."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-import os
 import sys
-from typing import Dict, List, Mapping, Sequence, Set
-
-# Ensure repository root is on sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from src.contracts.model_candidate_contract import (
-    DEFAULT_EVAL_K,
-    DEFAULT_N_CANDIDATES,
-    generate_mostpop_candidates,
-    generate_random_candidates,
-)
-from src.metrics import (
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from metrics import (  # noqa: E402
     catalog_coverage,
     exposure_by_cross,
     exposure_parity,
@@ -40,223 +26,337 @@ from src.metrics import (
     store_exposure_share,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+log = logging.getLogger("evaluate")
+
+PROCESSED = REPO_ROOT / "data" / "processed"
+RESULTS = REPO_ROOT / "results"
+
+K = 10
+N_CANDIDATES = 200
+N_EVAL_USERS = 300_000
+SEED = 42
+
+POP_BUCKETS = ("head", "mid", "tail")
+STORE_BUCKETS = ("small", "large", "unknown")
 
 
-def evaluate_baseline_models(
-    baseline_scores_path: str = "results/baseline_scores.parquet",
-    ratings_path: str = "data/processed/ratings.parquet",
-    items_path: str = "data/processed/items.parquet",
-    results_dir: str = "results",
-    k: int = DEFAULT_EVAL_K,
-    n_candidates: int = DEFAULT_N_CANDIDATES,
-) -> Dict[str, object]:
-    os.makedirs(results_dir, exist_ok=True)
+# --------------------------------------------------------------------------- populations
 
-    logger.info("Loading artefacts for evaluation...")
-    scores_df = pd.read_parquet(baseline_scores_path)
-    ratings_df = pd.read_parquet(ratings_path)
-    items_df = pd.read_parquet(items_path)
 
-    # Filter catalogue items
-    catalogue_items = items_df[items_df["in_catalogue"]].copy()
-    catalog_size = len(catalogue_items)
-    catalogue_item_ids = sorted(catalogue_items["itemId"].tolist())
+def build_populations(train: pd.DataFrame) -> dict[str, pd.Index]:
+    """Sample the two evaluation populations from train-positive counts.
 
-    # Build mappings
-    pop_bucket_of: Dict[str, str] = items_df.set_index("itemId")["pop_bucket"].to_dict()
-    store_bucket_of: Dict[str, str] = items_df.set_index("itemId")["store_bucket"].to_dict()
-    popularity_of: Dict[str, float] = items_df.set_index("itemId")["n_train_ratings"].astype(float).to_dict()
+    Sorting before the draw makes the sample independent of file order; the same seed then
+    reproduces it across runs. The cap keeps candidate generation and the six-lambda sweep
+    finite.
+    """
+    counts = train.groupby("userId").size()
+    rng = np.random.default_rng(SEED)
 
-    # Item share per bucket over recommendable catalogue
-    cat_pop_counts = catalogue_items["pop_bucket"].value_counts()
-    item_share: Dict[str, float] = {
-        b: float(cat_pop_counts.get(b, 0) / catalog_size) if catalog_size > 0 else 0.0
-        for b in ("head", "mid", "tail")
+    out: dict[str, pd.Index] = {}
+    for name, minimum in (("exposure_pop", 1), ("relevance_pop", 2)):
+        eligible = np.sort(counts.index[counts >= minimum].to_numpy())
+        if len(eligible) > N_EVAL_USERS:
+            picked = rng.choice(eligible, size=N_EVAL_USERS, replace=False)
+            eligible = np.sort(picked)
+        out[name] = pd.Index(eligible, name="userId")
+        log.info(
+            "%s: %d eligible, %d sampled", name, int((counts >= minimum).sum()), len(eligible)
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- candidate sets
+
+
+def candidate_sets(
+    users: pd.Index,
+    catalogue: pd.Index,
+    seen: dict[str, set[str]],
+) -> dict[str, np.ndarray]:
+    """Catalogue items minus each user's rated items, as a positional index array.
+
+    One array per user. Every item the user rated is excluded, low ratings included: a rated
+    item is observed, not a recommendation opportunity.
+    """
+    catalogue_arr = catalogue.to_numpy()
+    catalogue_set = set(catalogue_arr)
+    out: dict[str, np.ndarray] = {}
+    for user in users:
+        excluded = seen.get(user, set()) & catalogue_set
+        out[user] = catalogue_arr[~np.isin(catalogue_arr, list(excluded))] if excluded else catalogue_arr
+    return out
+
+
+def top_n(ordered_items: np.ndarray, ordered_scores: np.ndarray, n: int) -> list[int]:
+    """Top ``n`` item positions, ties broken by item position ascending for determinism."""
+    if len(ordered_items) <= n:
+        return ordered_items.tolist()
+    return ordered_items[:n].tolist()
+
+
+# --------------------------------------------------------------------------- recommenders
+
+
+def als_recommendations(
+    candidates: dict[str, np.ndarray],
+    user_factors: np.ndarray,
+    item_factors: np.ndarray,
+    user_index: dict[str, int],
+    item_index: dict[str, int],
+    catalogue: pd.Index,
+    n: int = N_CANDIDATES,
+) -> dict[str, list[int]]:
+    """Full-ranking ALS: score every catalogue item, take the top ``n``.
+
+    Only the candidate set is scored, so the result is a ranking over what the user could
+    still be shown. No negatives are sampled, which keeps NDCG unconditional on a sampled
+    subset.
+    """
+    out: dict[str, list[int]] = {}
+    for user, cand in candidates.items():
+        if not len(cand):
+            out[user] = []
+            continue
+        cand_pos = np.array([item_index[i] for i in cand])
+        scores = item_factors[cand_pos] @ user_factors[user_index[user]]
+        order = np.argsort(-scores, kind="stable")
+        out[user] = top_n(cand[order], scores[order], n)
+    return out
+
+
+def mostpop_recommendations(
+    candidates: dict[str, np.ndarray],
+    popularity_rank: dict[str, int],
+    n: int = N_CANDIDATES,
+) -> dict[str, list[int]]:
+    """Most popular catalogue items the user has not rated.
+
+    Ranked by ``popularity_rank`` so ties at low interaction counts are broken by the same
+    rule the popularity buckets use.
+    """
+    out: dict[str, list[int]] = {}
+    for user, cand in candidates.items():
+        order = sorted(cand.tolist(), key=lambda i: (popularity_rank[i], i))
+        out[user] = order[:n]
+    return out
+
+
+def random_recommendations(
+    candidates: dict[str, np.ndarray], n: int = N_CANDIDATES, seed: int = SEED
+) -> dict[str, list[int]]:
+    """Uniform sample of the candidate set, drawn from one seeded generator.
+
+    Users are iterated in a fixed order so the draw does not depend on dict construction.
+    """
+    rng = np.random.default_rng(seed)
+    out: dict[str, list[int]] = {}
+    for user in sorted(candidates):
+        cand = candidates[user]
+        if len(cand) <= n:
+            out[user] = cand.tolist()
+        else:
+            out[user] = cand[rng.choice(len(cand), size=n, replace=False)].tolist()
+    return out
+
+
+# --------------------------------------------------------------------------- scoring
+
+
+def score_population(
+    users: pd.Index,
+    recs: dict[str, list[int]],
+    relevant: dict[str, set[str]],
+    pop_bucket_of: dict[str, str],
+    store_bucket_of: dict[str, str],
+    popularity_of: dict[str, float],
+    item_share: dict[str, float],
+    catalogue: pd.Index,
+    with_relevance: bool,
+    k: int = K,
+) -> dict:
+    """Aggregate one recommender over one population.
+
+    ``with_relevance`` is False on the exposure population: those users have no held-out
+    positive, so NDCG and hitrate would be 0.0 by construction rather than by measurement.
+    """
+    rec_lists = [recs[u][:k] for u in users if recs.get(u)]
+    per_user_ndcg = {
+        u: ndcg_at_k(recs.get(u, []), relevant.get(u, set()), k) for u in users
+    }
+    per_user_hit = {
+        u: hitrate_at_k(recs.get(u, []), relevant.get(u, set()), k) for u in users
     }
 
-    # Identify user populations
-    train_ratings = ratings_df[ratings_df["split"] == "train"]
-    train_pos_counts = train_ratings[train_ratings["rating"] >= 4.0].groupby("userId").size()
+    exposure = exposure_share(rec_lists, pop_bucket_of, buckets=POP_BUCKETS)
+    out: dict = {"n_users": int(len(users))}
 
-    exposure_eligible = set(train_pos_counts[train_pos_counts >= 1].index)
-    relevance_eligible = set(train_pos_counts[train_pos_counts >= 2].index)
+    if with_relevance:
+        out["ndcg"] = float(np.mean(list(per_user_ndcg.values()))) if len(users) else 0.0
+        out["hitrate"] = float(np.mean(list(per_user_hit.values()))) if len(users) else 0.0
 
-    # Test ground truth: single held-out test item per user
-    test_ratings = ratings_df[ratings_df["split"] == "test"]
-    test_ground_truth: Dict[str, str] = test_ratings.set_index("userId")["itemId"].to_dict()
-
-    # Evaluated users present in baseline_scores
-    evaluated_users = scores_df["userId"].unique().tolist()
-    logger.info("Total evaluated users with candidates: %d", len(evaluated_users))
-
-    # Group candidates by user (ordered by rank)
-    scores_df = scores_df.sort_values(["userId", "rank"])
-    user_candidates: Dict[str, List[str]] = (
-        scores_df.groupby("userId")["itemId"].apply(list).to_dict()
+    out["exposure_share"] = exposure
+    out["store_exposure_share"] = store_exposure_share(rec_lists, store_bucket_of)
+    out["exposure_share_by_pop"] = exposure_by_cross(
+        rec_lists, pop_bucket_of, store_bucket_of, POP_BUCKETS, STORE_BUCKETS
+    )
+    out["exposure_parity"] = exposure_parity(exposure, item_share, POP_BUCKETS)
+    out["coverage"] = catalog_coverage(rec_lists, len(catalogue))
+    out["gini_popularity"] = gini(
+        # Exposure counts per catalogue item, including never-recommended ones.
+        _exposure_counts(rec_lists, catalogue)
+    )
+    out["mean_recommended_popularity"] = mean_recommended_popularity(
+        rec_lists, popularity_of
     )
 
-    # Seen items per user
-    seen_df = ratings_df[ratings_df["seen"] == True]
-    user_seen_dict: Dict[str, Set[str]] = seen_df.groupby("userId")["itemId"].apply(set).to_dict()
+    out["_per_user"] = {"ndcg": per_user_ndcg, "hit": per_user_hit}
+    return out
 
-    # 1. Evaluate Exposure Population (users in evaluated_users with >= 1 train positive)
-    exp_users = [u for u in evaluated_users if u in exposure_eligible]
-    exp_recs_k = [user_candidates[u][:k] for u in exp_users if u in user_candidates]
 
-    exp_exposure = exposure_share(exp_recs_k, pop_bucket_of)
-    exp_store_exp = store_exposure_share(exp_recs_k, store_bucket_of)
-    exp_cross = exposure_by_cross(exp_recs_k, pop_bucket_of, store_bucket_of)
-    exp_parity = exposure_parity(exp_exposure, item_share)
-    exp_cov = catalog_coverage(exp_recs_k, catalog_size)
-    
-    # Exposure counts for Gini over all catalogue items
-    cat_item_counts = {it: 0 for it in catalogue_item_ids}
-    for recs in exp_recs_k:
-        for it in recs:
-            if it in cat_item_counts:
-                cat_item_counts[it] += 1
-    exp_gini = gini(cat_item_counts.values())
-    exp_mean_pop = mean_recommended_popularity(exp_recs_k, popularity_of)
+def _exposure_counts(rec_lists: list[list[int]], catalogue: pd.Index) -> list[int]:
+    """Slot count per catalogue item, zeros included.
 
-    # 2. Evaluate Relevance Population (users in evaluated_users with >= 2 train positives)
-    rel_users = [u for u in evaluated_users if u in relevance_eligible and u in test_ground_truth]
-    rel_recs_k = [user_candidates[u][:k] for u in rel_users if u in user_candidates]
+    Gini over recommended items alone would measure concentration among winners; the
+    never-recommended items are most of the inequality. The universe is the catalogue, not
+    the items that carry a bucket label: every catalogue item has one.
+    """
+    counts = dict.fromkeys(catalogue, 0)
+    for recs in rec_lists:
+        for item in recs:
+            if item in counts:
+                counts[item] += 1
+    return list(counts.values())
 
-    ndcg_vals = [
-        ndcg_at_k(user_candidates[u][:k], [test_ground_truth[u]], k)
-        for u in rel_users
-        if u in user_candidates
-    ]
-    hit_vals = [
-        hitrate_at_k(user_candidates[u][:k], [test_ground_truth[u]], k)
-        for u in rel_users
-        if u in user_candidates
-    ]
-    mean_ndcg = float(np.mean(ndcg_vals)) if ndcg_vals else 0.0
-    mean_hit = float(np.mean(hit_vals)) if hit_vals else 0.0
 
-    rel_exposure = exposure_share(rel_recs_k, pop_bucket_of)
-    rel_store_exp = store_exposure_share(rel_recs_k, store_bucket_of)
-    rel_cov = catalog_coverage(rel_recs_k, catalog_size)
-    rel_item_counts = {it: 0 for it in catalogue_item_ids}
-    for recs in rel_recs_k:
-        for it in recs:
-            if it in rel_item_counts:
-                rel_item_counts[it] += 1
-    rel_gini = gini(rel_item_counts.values())
+# --------------------------------------------------------------------------- main
 
-    # 3. Evaluate MostPop Baseline
-    item_train_ratings_int = {it: int(items_df.loc[items_df["itemId"] == it, "n_train_ratings"].values[0]) if it in items_df["itemId"].values else 0 for it in catalogue_item_ids}
-    
-    mostpop_exp_recs = []
-    for u in exp_users:
-        seen = user_seen_dict.get(u, set())
-        cands = generate_mostpop_candidates(catalogue_item_ids, item_train_ratings_int, seen, n_candidates=k)
-        mostpop_exp_recs.append([c[0] for c in cands])
-    mostpop_exp_share = exposure_share(mostpop_exp_recs, pop_bucket_of)
 
-    mostpop_rel_ndcg = []
-    mostpop_rel_hit = []
-    for u in rel_users:
-        seen = user_seen_dict.get(u, set())
-        cands = generate_mostpop_candidates(catalogue_item_ids, item_train_ratings_int, seen, n_candidates=k)
-        recs = [c[0] for c in cands]
-        target = [test_ground_truth[u]]
-        mostpop_rel_ndcg.append(ndcg_at_k(recs, target, k))
-        mostpop_rel_hit.append(hitrate_at_k(recs, target, k))
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--k", type=int, default=K)
+    parser.add_argument("--n-candidates", type=int, default=N_CANDIDATES)
+    args = parser.parse_args(argv)
 
-    # 4. Evaluate Random Baseline
-    random_exp_recs = []
-    for u in exp_users:
-        seen = user_seen_dict.get(u, set())
-        seed = int(abs(hash((42, str(u)))) % (2**31))
-        cands = generate_random_candidates(catalogue_item_ids, seen, seed=seed, n_candidates=k)
-        random_exp_recs.append([c[0] for c in cands])
-    random_exp_share = exposure_share(random_exp_recs, pop_bucket_of)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    RESULTS.mkdir(parents=True, exist_ok=True)
 
-    random_rel_ndcg = []
-    random_rel_hit = []
-    for u in rel_users:
-        seen = user_seen_dict.get(u, set())
-        seed = int(abs(hash((42, str(u)))) % (2**31))
-        cands = generate_random_candidates(catalogue_item_ids, seen, seed=seed, n_candidates=k)
-        recs = [c[0] for c in cands]
-        target = [test_ground_truth[u]]
-        random_rel_ndcg.append(ndcg_at_k(recs, target, k))
-        random_rel_hit.append(hitrate_at_k(recs, target, k))
+    ratings = pd.read_parquet(PROCESSED / "ratings.parquet")
+    items = pd.read_parquet(PROCESSED / "items.parquet")
+    factors = np.load(RESULTS / "model" / "als_factors.npz")
+    baseline_scores = pd.read_parquet(RESULTS / "baseline_scores.parquet")
 
-    # Construct final baseline_metrics.json structure
-    metrics_result = {
-        "k": k,
-        "n_candidates": n_candidates,
-        "catalog_size": catalog_size,
-        "exposure_pop": {
-            "n_users": len(exp_users),
-            "exposure_share": exp_exposure,
-            "store_exposure_share": exp_store_exp,
-            "exposure_share_by_pop": exp_cross,
-            "exposure_parity": exp_parity,
-            "coverage": float(exp_cov),
-            "gini_popularity": float(exp_gini),
-            "mean_recommended_popularity": float(exp_mean_pop),
-        },
-        "relevance_pop": {
-            "n_users": len(rel_users),
-            "ndcg": float(mean_ndcg),
-            "hitrate": float(mean_hit),
-            "exposure_share": rel_exposure,
-            "store_exposure_share": rel_store_exp,
-            "coverage": float(rel_cov),
-            "gini_popularity": float(rel_gini),
-        },
-        "baselines": {
-            "mostpop": {
-                "exposure_pop": {
-                    "ndcg": None,
-                    "exposure_share": mostpop_exp_share,
-                },
-                "relevance_pop": {
-                    "ndcg": float(np.mean(mostpop_rel_ndcg)) if mostpop_rel_ndcg else 0.0,
-                    "hitrate": float(np.mean(mostpop_rel_hit)) if mostpop_rel_hit else 0.0,
-                },
-            },
-            "random": {
-                "exposure_pop": {
-                    "ndcg": None,
-                    "exposure_share": random_exp_share,
-                },
-                "relevance_pop": {
-                    "ndcg": float(np.mean(random_rel_ndcg)) if random_rel_ndcg else 0.0,
-                    "hitrate": float(np.mean(random_rel_hit)) if random_rel_hit else 0.0,
-                },
-            },
-        },
+    train = ratings[ratings["split"] == "train"]
+    test = ratings[ratings["split"] == "test"]
+    catalogue = pd.Index(items.loc[items["in_catalogue"], "itemId"])
+    catalog_size = len(catalogue)
+
+    pop_bucket_of = dict(zip(items["itemId"], items["pop_bucket"]))
+    store_bucket_of = dict(zip(items["itemId"], items["store_bucket"]))
+    popularity_of = dict(zip(items["itemId"], items["n_train_ratings"].astype(float)))
+    popularity_rank = dict(zip(items["itemId"], items["popularity_rank"]))
+    item_index = {item: i for i, item in enumerate(items["itemId"])}
+
+    cat = items[items["in_catalogue"]]
+    item_share = {
+        b: float(len(cat[cat["pop_bucket"] == b]) / catalog_size) if catalog_size else 0.0
+        for b in POP_BUCKETS
     }
 
-    metrics_path = os.path.join(results_dir, "baseline_metrics.json")
-    with open(metrics_path, "w", encoding="utf-8") as f:
-        json.dump(metrics_result, f, indent=2)
-    logger.info("Saved baseline metrics to %s", metrics_path)
-    return metrics_result
+    # The held-out positive is unknown at ranking time and must remain recommendable.
+    # Training positives and non-positive observations are already known and excluded.
+    observed_before_test = ratings[ratings["split"] != "test"]
+    seen: dict[str, set[str]] = observed_before_test.groupby("userId")["itemId"].agg(set).to_dict()
+    relevant = test.groupby("userId")["itemId"].agg(set).to_dict()
+
+    user_index = {u: i for i, u in enumerate(_user_order(baseline_scores, factors))}
+
+    populations = build_populations(train)
+
+    result: dict = {
+        "k": args.k,
+        "n_candidates": args.n_candidates,
+        "catalog_size": catalog_size,
+    }
+    per_user_rows: list[pd.DataFrame] = []
+
+    for pop_name, users in populations.items():
+        log.info("scoring %s (%d users)", pop_name, len(users))
+        candidates = candidate_sets(users, catalogue, seen)
+        with_relevance = pop_name == "relevance_pop"
+
+        model_recs: dict[str, dict[str, list[int]]] = {
+            "als": als_recommendations(
+                candidates, factors["user_factors"], factors["item_factors"],
+                user_index, item_index, catalogue, args.n_candidates,
+            ),
+            "mostpop": mostpop_recommendations(
+                candidates, popularity_rank, args.n_candidates
+            ),
+            "random": random_recommendations(
+                candidates, args.n_candidates
+            ),
+        }
+
+        blocks: dict[str, dict] = {}
+        for model_name, recs in model_recs.items():
+            scored = score_population(
+                users, recs, relevant, pop_bucket_of, store_bucket_of, popularity_of,
+                item_share, catalogue, with_relevance, args.k,
+            )
+            per_user = scored.pop("_per_user")
+            blocks[model_name] = scored
+            # One row per user; only the ALS rows belong in the baseline per-user table,
+            # since the baselines are not the sweep's subject.
+            if model_name == "als":
+                per_user_rows.append(
+                    pd.DataFrame(
+                        {
+                            "userId": list(per_user["ndcg"].keys()),
+                            "population": pop_name,
+                            "lambda": np.nan,  # filled by 04_rerank.py
+                            "ndcg": list(per_user["ndcg"].values()),
+                            "hit": list(per_user["hit"].values()),
+                        }
+                    )
+                )
+
+        als_block = blocks["als"]
+        # baseline_metrics.json keeps the ALS block flat and nests the baselines, per §3.
+        result[pop_name] = als_block
+        for name, block in blocks.items():
+            if name == "als":
+                continue
+            # Exposure needs no ground truth, so a baseline's exposure-pop ndcg is null by
+            # design rather than a zero that reads as measured.
+            result.setdefault("baselines", {}).setdefault(name, {})[pop_name] = {
+                "ndcg": block.get("ndcg"),
+                "hitrate": block.get("hitrate"),
+                "exposure_share": block["exposure_share"],
+            }
+
+    per_user_frame = pd.concat(per_user_rows, ignore_index=True)
+    per_user_frame.to_parquet(RESULTS / "per_user_metrics.parquet", index=False)
+    log.info("wrote %s (%d rows)", RESULTS / "per_user_metrics.parquet", len(per_user_frame))
+
+    (RESULTS / "baseline_metrics.json").write_text(json.dumps(result, indent=2) + "\n")
+    log.info("wrote %s", RESULTS / "baseline_metrics.json")
+    return 0
+
+
+def _user_order(baseline_scores: pd.DataFrame, factors) -> list[str]:
+    """ALS user row order, as recorded by 02_train.py.
+
+    ``user_factors`` rows are positional; the training stage writes the order it used to
+    ``results/model/user_order.json``.
+    """
+    path = RESULTS / "model" / "user_order.json"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} is missing; 02_train.py writes it alongside als_factors.npz"
+        )
+    return json.loads(path.read_text())
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="03_evaluate: Evaluate ALS baseline model and baselines.")
-    parser.add_argument("--baseline-scores", type=str, default="results/baseline_scores.parquet")
-    parser.add_argument("--ratings-path", type=str, default="data/processed/ratings.parquet")
-    parser.add_argument("--items-path", type=str, default="data/processed/items.parquet")
-    parser.add_argument("--results-dir", type=str, default="results")
-    parser.add_argument("--k", type=int, default=DEFAULT_EVAL_K)
-    parser.add_argument("--n-candidates", type=int, default=DEFAULT_N_CANDIDATES)
-    args = parser.parse_args()
-
-    evaluate_baseline_models(
-        baseline_scores_path=args.baseline_scores,
-        ratings_path=args.ratings_path,
-        items_path=args.items_path,
-        results_dir=args.results_dir,
-        k=args.k,
-        n_candidates=args.n_candidates,
-    )
+    raise SystemExit(main())
