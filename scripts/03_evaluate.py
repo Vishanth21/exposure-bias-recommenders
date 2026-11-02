@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 import argparse
 import json
 import logging
@@ -67,6 +68,45 @@ def build_populations(train: pd.DataFrame) -> dict[str, pd.Index]:
     return out
 
 
+def _catalogue_index_for_unseen_rank(rank: int, excluded_positions: list[int]) -> int:
+    """Map a rank in the unseen catalogue back to the full catalogue index."""
+    low = rank
+    high = rank + len(excluded_positions)
+    while low < high:
+        middle = (low + high) // 2
+        available_through_middle = middle + 1 - bisect_right(excluded_positions, middle)
+        if available_through_middle <= rank:
+            low = middle + 1
+        else:
+            high = middle
+    return low
+
+
+def _random_unseen_items(
+    catalogue: np.ndarray,
+    excluded_positions: list[int],
+    rng: np.random.Generator,
+    candidate_count: int,
+    k: int,
+) -> list[str]:
+    """Sample a random ordered prefix without scanning the catalogue per user."""
+    available_count = len(catalogue) - len(excluded_positions)
+    if available_count <= candidate_count:
+        excluded = set(excluded_positions)
+        return [
+            item
+            for position, item in enumerate(catalogue)
+            if position not in excluded
+        ][:k]
+
+    unseen_ranks = rng.choice(available_count, size=candidate_count, replace=False)
+    catalogue_indices = [
+        _catalogue_index_for_unseen_rank(int(rank), excluded_positions)
+        for rank in unseen_ranks[:k]
+    ]
+    return catalogue[catalogue_indices].tolist()
+
+
 # --------------------------------------------------------------------------- recommendation construction
 
 
@@ -82,7 +122,7 @@ def build_recommendations(
 ) -> dict[str, dict[str, list[str]]]:
     """Keep only each user's metric prefix; the larger candidate pool is temporary."""
     catalogue_arr = catalogue.to_numpy()
-    catalogue_set = set(catalogue_arr)
+    catalogue_position = {item: position for position, item in enumerate(catalogue_arr)}
     mostpop_order = sorted(catalogue_arr.tolist(), key=lambda item: (popularity_rank[item], item))
     rng = np.random.default_rng(seed)
     out = {"als": {}, "mostpop": {}, "random": {}}
@@ -91,11 +131,8 @@ def build_recommendations(
 
     for position, user in enumerate(users, start=1):
         known = seen.get(user, set())
-        excluded = known & catalogue_set
-        available = (
-            catalogue_arr[~np.isin(catalogue_arr, list(excluded))]
-            if excluded
-            else catalogue_arr
+        excluded_positions = sorted(
+            catalogue_position[item] for item in known if item in catalogue_position
         )
         out["als"][user] = als_recs.get(user, [])[:k]
 
@@ -107,11 +144,9 @@ def build_recommendations(
                     break
         out["mostpop"][user] = best
 
-        if len(available) <= candidate_count:
-            sampled = available
-        else:
-            sampled = available[rng.choice(len(available), size=candidate_count, replace=False)]
-        out["random"][user] = sampled[:k].tolist()
+        out["random"][user] = _random_unseen_items(
+            catalogue_arr, excluded_positions, rng, candidate_count, k
+        )
 
         if position - last_progress >= 10_000 or position == len(users):
             elapsed = max(time.monotonic() - started_at, 1e-9)
