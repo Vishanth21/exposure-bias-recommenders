@@ -54,6 +54,9 @@ from src.metrics import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+EVAL_SAMPLE_SIZE = 300_000
+EVAL_SAMPLE_SEED = 42
+
 
 def run_reranking_sweep(
     baseline_scores_path: str = "results/baseline_scores.parquet",
@@ -97,9 +100,16 @@ def run_reranking_sweep(
 
     train_ratings = ratings_df[ratings_df["split"] == "train"]
     train_pos_counts = train_ratings[train_ratings["rating"] >= 4.0].groupby("userId").size()
-
-    exposure_eligible = set(train_pos_counts[train_pos_counts >= 1].index)
-    relevance_eligible = set(train_pos_counts[train_pos_counts >= 2].index)
+    sample_rng = np.random.default_rng(EVAL_SAMPLE_SEED)
+    sampled_populations = []
+    for minimum in (1, 2):
+        eligible = np.sort(train_pos_counts.index[train_pos_counts >= minimum].to_numpy())
+        if len(eligible) > EVAL_SAMPLE_SIZE:
+            eligible = np.sort(
+                sample_rng.choice(eligible, size=EVAL_SAMPLE_SIZE, replace=False)
+            )
+        sampled_populations.append(set(eligible))
+    exposure_eligible, relevance_eligible = sampled_populations
 
     test_ratings = ratings_df[ratings_df["split"] == "test"]
     test_ground_truth: Dict[str, str] = test_ratings.set_index("userId")["itemId"].to_dict()
@@ -133,6 +143,21 @@ def run_reranking_sweep(
     evaluated_users = list(user_candidates)
     exp_users = [u for u in evaluated_users if u in exposure_eligible]
     rel_users = [u for u in evaluated_users if u in relevance_eligible and u in test_ground_truth]
+
+    expected_users = {
+        "exposure_pop": baseline_metrics["exposure_pop"]["n_users"],
+        "relevance_pop": baseline_metrics["relevance_pop"]["n_users"],
+    }
+    actual_users = {"exposure_pop": len(exp_users), "relevance_pop": len(rel_users)}
+    if actual_users != expected_users:
+        raise ValueError(
+            "baseline candidate users do not match the evaluated populations: "
+            f"expected={expected_users}, actual={actual_users}"
+        )
+    logger.info(
+        "Matched baseline populations: exposure_pop=%d, relevance_pop=%d",
+        len(exp_users), len(rel_users),
+    )
 
     als_baseline_ndcg = baseline_metrics["relevance_pop"]["ndcg"]
     random_baseline_ndcg = baseline_metrics["baselines"]["random"]["relevance_pop"]["ndcg"]
