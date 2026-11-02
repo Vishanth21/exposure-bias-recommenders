@@ -18,6 +18,8 @@ from __future__ import annotations
 import logging
 import os
 import time
+import gzip
+import json
 from typing import Sequence
 
 import numpy as np
@@ -79,6 +81,45 @@ def _log_stream_progress(kind: str, count: int, started_at: float) -> None:
         elapsed / 60,
         count / elapsed,
     )
+
+
+def _load_reviews_jsonl(path: str, limit: int | None) -> pd.DataFrame:
+    columns = {"user_id": [], "parent_asin": [], "rating": [], "timestamp": []}
+    started_at = time.monotonic()
+    count = 0
+    logger.info("reviews: parsing local gzip JSONL %s", path)
+    with gzip.open(path, "rt", encoding="utf-8") as stream:
+        for count, line in enumerate(stream, start=1):
+            row = json.loads(line)
+            for name in columns:
+                columns[name].append(row.get(name))
+            if count % PROGRESS_INTERVAL == 0:
+                _log_stream_progress("reviews", count, started_at)
+            if limit is not None and count >= limit:
+                break
+    _log_stream_progress("reviews complete", count, started_at)
+    return pd.DataFrame(columns)
+
+
+def _load_metadata_jsonl(path: str, category: str, limit: int | None) -> pd.DataFrame:
+    columns = {"parent_asin": [], "title": [], "store": [], "main_category": [], "price": []}
+    started_at = time.monotonic()
+    count = 0
+    logger.info("metadata: parsing local gzip JSONL %s", path)
+    with gzip.open(path, "rt", encoding="utf-8") as stream:
+        for count, line in enumerate(stream, start=1):
+            row = json.loads(line)
+            columns["parent_asin"].append(row.get("parent_asin", ""))
+            columns["title"].append(row.get("title", ""))
+            columns["store"].append(row.get("store", ""))
+            columns["main_category"].append(row.get("main_category", category))
+            columns["price"].append(_normalise_price(row.get("price")))
+            if count % PROGRESS_INTERVAL == 0:
+                _log_stream_progress("metadata", count, started_at)
+            if limit is not None and count >= limit:
+                break
+    _log_stream_progress("metadata complete", count, started_at)
+    return pd.DataFrame(columns)
 
 
 def _generate_synthetic_reviews(n_users: int = 1500, n_items: int = 400, n_interactions: int = 8000, seed: int = 42) -> pd.DataFrame:
@@ -147,10 +188,14 @@ def load_reviews(category: str = "Electronics", limit: int | None = None) -> pd.
 
     started_at = time.monotonic()
     cache_path = os.path.join("data", "raw", f"{category}_reviews.parquet")
+    jsonl_path = os.path.join("data", "raw", f"{category}.jsonl.gz")
     cacheable = False
     if os.path.exists(cache_path):
         logger.info("reviews: reading local cache %s", cache_path)
         df = pd.read_parquet(cache_path)
+    elif os.path.exists(jsonl_path):
+        df = _load_reviews_jsonl(jsonl_path, limit)
+        cacheable = True
     else:
         logger.info(
             "reviews: opening Hugging Face stream for %s (limit=%s, batch=%s)",
@@ -227,10 +272,14 @@ def load_metadata(category: str = "Electronics", limit: int | None = None) -> pd
 
     started_at = time.monotonic()
     cache_path = os.path.join("data", "raw", f"{category}_metadata.parquet")
+    jsonl_path = os.path.join("data", "raw", f"meta_{category}.jsonl.gz")
     cacheable = False
     if os.path.exists(cache_path):
         logger.info("metadata: reading local cache %s", cache_path)
         df = pd.read_parquet(cache_path)
+    elif os.path.exists(jsonl_path):
+        df = _load_metadata_jsonl(jsonl_path, category, limit)
+        cacheable = True
     else:
         logger.info(
             "metadata: opening Hugging Face stream for %s (limit=%s, batch=%s)",
