@@ -6,7 +6,9 @@ data/*.zip
 
 # Generated results, figures & scratch
 results/
+results_b/
 scratch/
+figures_b/
 figures/*.png
 figures/*.pdf
 *.npz

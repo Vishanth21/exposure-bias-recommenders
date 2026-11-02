@@ -28,6 +28,7 @@
 | Excluded candidates | Training positives and non-positive observations are removed from candidates, **including low-rated ones**. The held-out test positive remains eligible so relevance metrics can rank it. Test items outside the catalogue are excluded and counted in the funnel. |
 | Split | Temporal leave-last-out per user: the **last positive** (`rating >= 4`) → `test`, all earlier positives → `train`. Ties broken by `timestamp`, then `itemId` for determinism. |
 | Candidate set | Catalogue items (`>= 3` train interactions) minus the user's own rated items. Test items outside the catalogue are **excluded**, and the dropped fraction is reported. |
+| Candidate policy | `tail_candidate_quota=0` selects the global top `N` ALS candidates. For quota `T > 0`, select the global top `N−T` plus the `T` highest-scoring unseen tail items, then order the union by score descending, popularity rank ascending, and `itemId` ascending. |
 | Seeds | `random.seed(42)`, `np.random.seed(42)`, ALS `random_state=42`. |
 | Paths | All paths relative to repo root. |
 
@@ -195,7 +196,7 @@ item_factors : float32 [n_items, factors]
 
 ### `results/baseline_scores.parquet`
 
-Top-`N` candidates per evaluated user, `N = 200`:
+`N = 200` candidates per evaluated user:
 
 | column | dtype |
 |---|---|
@@ -204,8 +205,11 @@ Top-`N` candidates per evaluated user, `N = 200`:
 | `score` | float32 |
 | `rank` | int16 (0 = best) |
 
-Frozen: already excludes the user's train items (no leak). Exactly `N` rows per test user
-except where fewer candidates exist.
+Frozen: already excludes the user's train items (no leak). Exactly `N` rows per evaluated user
+except where fewer candidates exist. The candidate policy is recorded in the run manifest. A
+positive `tail_candidate_quota` replaces the same number of global ALS candidates with the
+highest-scoring unseen tail items; all rows are then ordered by ALS score descending, popularity
+rank ascending, and `itemId` ascending.
 
 ### `results/run_manifest.json`
 
@@ -217,7 +221,7 @@ except where fewer candidates exist.
   "python": "3.11.9",
   "packages": {"numpy": "...", "pandas": "...", "implicit": "..."},
   "params": {"factors": 64, "iterations": 15, "regularization": 0.05, "alpha": 20,
-             "n_candidates": 200, "k": 10, "min_rating": 4.0, "min_catalogue_interactions": 3,
+             "n_candidates": 200, "tail_candidate_quota": 0, "k": 10, "min_rating": 4.0, "min_catalogue_interactions": 3,
              "min_train_positives_exposure": 1, "min_train_positives_relevance": 2,
              "n_eval_users": 300000, "n_candidates": 200},
   "counts": {"n_users": 0, "n_items": 0, "n_train": 0, "n_test": 0}
