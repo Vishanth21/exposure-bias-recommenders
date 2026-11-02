@@ -244,7 +244,6 @@ def main(argv: list[str] | None = None) -> int:
     ratings = pd.read_parquet(PROCESSED / "ratings.parquet")
     items = pd.read_parquet(PROCESSED / "items.parquet")
     factors = np.load(RESULTS / "model" / "als_factors.npz")
-    baseline_scores = pd.read_parquet(RESULTS / "baseline_scores.parquet")
 
     train = ratings[ratings["split"] == "train"]
     test = ratings[ratings["split"] == "test"]
@@ -255,7 +254,9 @@ def main(argv: list[str] | None = None) -> int:
     store_bucket_of = dict(zip(items["itemId"], items["store_bucket"]))
     popularity_of = dict(zip(items["itemId"], items["n_train_ratings"].astype(float)))
     popularity_rank = dict(zip(items["itemId"], items["popularity_rank"]))
-    item_index = {item: i for i, item in enumerate(items["itemId"])}
+    item_index = {
+        item: i for i, item in enumerate(factors["item_ids"].astype(str))
+    }
 
     cat = items[items["in_catalogue"]]
     item_share = {
@@ -269,7 +270,9 @@ def main(argv: list[str] | None = None) -> int:
     seen: dict[str, set[str]] = observed_before_test.groupby("userId")["itemId"].agg(set).to_dict()
     relevant = test.groupby("userId")["itemId"].agg(set).to_dict()
 
-    user_index = {u: i for i, u in enumerate(_user_order(baseline_scores, factors))}
+    user_index = {
+        user: i for i, user in enumerate(factors["user_ids"].astype(str))
+    }
 
     populations = build_populations(train)
 
@@ -342,20 +345,6 @@ def main(argv: list[str] | None = None) -> int:
     (RESULTS / "baseline_metrics.json").write_text(json.dumps(result, indent=2) + "\n")
     log.info("wrote %s", RESULTS / "baseline_metrics.json")
     return 0
-
-
-def _user_order(baseline_scores: pd.DataFrame, factors) -> list[str]:
-    """ALS user row order, as recorded by 02_train.py.
-
-    ``user_factors`` rows are positional; the training stage writes the order it used to
-    ``results/model/user_order.json``.
-    """
-    path = RESULTS / "model" / "user_order.json"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"{path} is missing; 02_train.py writes it alongside als_factors.npz"
-        )
-    return json.loads(path.read_text())
 
 
 if __name__ == "__main__":

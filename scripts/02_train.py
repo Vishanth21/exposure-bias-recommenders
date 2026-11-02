@@ -187,8 +187,9 @@ def train_and_generate_candidates(
     eval_users = sorted(list(eval_users_set))
     logger.info("Total sampled evaluation users to score: %d", len(eval_users))
 
-    # Seen items per user (all items rated in ratings_df where seen == True, including low-rated)
-    seen_df = ratings_df[ratings_df["seen"] == True]
+    # The held-out positive is unknown at ranking time and must remain a candidate.
+    # Exclude training positives and non-positive observations already available to the model.
+    seen_df = ratings_df[ratings_df["split"] != "test"]
     user_seen_dict = seen_df.groupby("userId")["itemId"].apply(set).to_dict()
 
     # 6. Candidate Generation (Full Ranking with seen-item hard masking)
