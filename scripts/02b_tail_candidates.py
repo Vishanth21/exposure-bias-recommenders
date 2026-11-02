@@ -59,6 +59,8 @@ def build_tail_augmented_candidates(
     if output_path.exists():
         raise FileExistsError(f"Refusing to overwrite {output_path}")
     partial_output_path = results_dir / "baseline_scores.parquet.partial"
+    if partial_output_path.exists():
+        partial_output_path.unlink()
 
     source_scores = source_results / "baseline_scores.parquet"
     source_manifest = source_results / "run_manifest.json"
@@ -204,14 +206,14 @@ def build_tail_augmented_candidates(
 
             fallback_start = keep_end
             for source_position in range(fallback_start, int(end)):
+                if len(candidate_ids) >= N_CANDIDATES:
+                    break
                 item = str(item_values[source_position])
                 if item not in selected_items:
                     candidate_ids.append(item)
                     candidate_scores.append(float(score_values[source_position]))
                     candidate_popularity.append(rank_by_item[item])
                     selected_items.add(item)
-                if len(candidate_ids) >= N_CANDIDATES:
-                    break
 
             if len(candidate_ids) != N_CANDIDATES:
                 raise ValueError(

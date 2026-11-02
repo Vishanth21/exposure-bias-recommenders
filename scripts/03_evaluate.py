@@ -247,6 +247,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--k", type=int, default=K)
     parser.add_argument("--n-candidates", type=int, default=N_CANDIDATES)
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS)
+    parser.add_argument("--data-dir", type=Path, default=PROCESSED)
+    parser.add_argument("--ratings-path", type=Path, default=None)
+    parser.add_argument("--items-path", type=Path, default=None)
+    parser.add_argument("--baseline-scores", type=Path, default=None)
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -255,8 +259,10 @@ def main(argv: list[str] | None = None) -> int:
 
     run_started = time.monotonic()
     stage_started = time.monotonic()
-    ratings = pd.read_parquet(PROCESSED / "ratings.parquet")
-    items = pd.read_parquet(PROCESSED / "items.parquet")
+    ratings_path = args.ratings_path or (args.data_dir / "ratings.parquet")
+    items_path = args.items_path or (args.data_dir / "items.parquet")
+    ratings = pd.read_parquet(ratings_path)
+    items = pd.read_parquet(items_path)
     log.info(
         "loaded ratings=%s and items=%s in %.1f min",
         f"{len(ratings):,}", f"{len(items):,}", (time.monotonic() - stage_started) / 60,
@@ -286,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
 
     populations = build_populations(train)
     stage_started = time.monotonic()
-    baseline_path = results_dir / "baseline_scores.parquet"
+    baseline_path = args.baseline_scores or (results_dir / "baseline_scores.parquet")
     als_top = pd.read_parquet(
         baseline_path,
         columns=["userId", "itemId", "rank"],
@@ -366,6 +372,29 @@ def main(argv: list[str] | None = None) -> int:
     log.info("evaluation complete in %.1f min", (time.monotonic() - run_started) / 60)
     return 0
 
+
+
+
+def evaluate_baseline_models(
+    baseline_scores_path: str | Path = "results/baseline_scores.parquet",
+    ratings_path: str | Path = "data/processed/ratings.parquet",
+    items_path: str | Path = "data/processed/items.parquet",
+    results_dir: str | Path = "results",
+    k: int = K,
+    n_candidates: int = N_CANDIDATES,
+) -> dict:
+    argv = [
+        "--k", str(k),
+        "--n-candidates", str(n_candidates),
+        "--results-dir", str(results_dir),
+        "--baseline-scores", str(baseline_scores_path),
+        "--ratings-path", str(ratings_path),
+        "--items-path", str(items_path),
+    ]
+    main(argv)
+    output_path = Path(results_dir) / "baseline_metrics.json"
+    with open(output_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 if __name__ == "__main__":
     raise SystemExit(main())
