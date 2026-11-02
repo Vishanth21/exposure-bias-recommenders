@@ -58,6 +58,15 @@ def extract_store(meta: pd.DataFrame) -> pd.Series:
     return stores.map(_clean_store).astype(str)
 
 
+def _normalise_price(value: object) -> float:
+    """Return a finite numeric price or NaN when the source value is unusable."""
+    try:
+        price = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float("nan")
+    return price if np.isfinite(price) else float("nan")
+
+
 def _generate_synthetic_reviews(n_users: int = 1500, n_items: int = 400, n_interactions: int = 8000, seed: int = 42) -> pd.DataFrame:
     """Deterministic synthetic review data for offline smoke testing and test suites."""
     rng = np.random.default_rng(seed)
@@ -189,7 +198,7 @@ def load_metadata(category: str = "Electronics", limit: int | None = None) -> pd
                     "title": str(row.get("title", "")),
                     "store": str(row.get("store", "") or ""),
                     "main_category": str(row.get("main_category", category)),
-                    "price": float(row["price"]) if row.get("price") is not None and not pd.isna(row.get("price")) else np.nan,
+                    "price": _normalise_price(row.get("price")),
                 })
             df = pd.DataFrame(records)
         except Exception as e:
