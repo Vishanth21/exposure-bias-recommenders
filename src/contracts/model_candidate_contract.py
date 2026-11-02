@@ -217,21 +217,19 @@ def rerank_candidate_list(
         ]
 
     z_scores = compute_zscore(candidate_scores, eps=eps)
-    log_pops = [np.log1p(max(0.0, float(p))) for p in candidate_popularities]
+    log_pops = np.log1p(
+        np.maximum(0.0, np.asarray(candidate_popularities, dtype=np.float64))
+    )
     z_pops = compute_zscore(log_pops, eps=eps)
 
     penalized_scores = z_scores - (float(lambda_val) * z_pops)
 
-    # Sort descending by final score; break ties with original rank
-    indexed_items = [
-        (penalized_scores[i], i, candidate_items[i])
-        for i in range(n)
-    ]
-    indexed_items.sort(key=lambda x: (-x[0], x[1]))
+    # NumPy keeps the score-descending, original-rank tie order without Python tuple sorting.
+    order = np.lexsort((np.arange(n), -penalized_scores))
 
     return [
-        (item_id, float(score), new_rank + 1)
-        for new_rank, (score, _, item_id) in enumerate(indexed_items)
+        (candidate_items[i], float(penalized_scores[i]), new_rank + 1)
+        for new_rank, i in enumerate(order)
     ]
 
 

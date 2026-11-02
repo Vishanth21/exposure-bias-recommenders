@@ -26,6 +26,7 @@ import os
 import pickle
 import subprocess
 import sys
+import time
 from typing import Dict, List, Set, Tuple
 
 # Ensure repository root is on sys.path
@@ -35,6 +36,8 @@ import numpy as np
 import pandas as pd
 import scipy
 import scipy.sparse as sp
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 import implicit
 from implicit.als import AlternatingLeastSquares
@@ -81,9 +84,15 @@ def train_and_generate_candidates(
     os.makedirs(model_dir, exist_ok=True)
     os.makedirs(results_dir, exist_ok=True)
 
+    stage_started = time.monotonic()
     logger.info("Reading ratings from %s and items from %s", ratings_path, items_path)
     ratings_df = pd.read_parquet(ratings_path)
     items_df = pd.read_parquet(items_path)
+    logger.info(
+        "Loaded ratings=%s rows, items=%s rows (%.1f min)",
+        f"{len(ratings_df):,}", f"{len(items_df):,}",
+        (time.monotonic() - stage_started) / 60,
+    )
 
     # 1. Catalogue items filter
     catalogue_items = items_df[items_df["in_catalogue"]].copy()
@@ -115,12 +124,16 @@ def train_and_generate_candidates(
     confidences = np.ones(len(train_cat_ratings), dtype=np.float32) + float(alpha) * 1.0
 
     # Build sparse user-item matrix (shape: n_users, n_items)
+    stage_started = time.monotonic()
     C_ui = sp.csr_matrix(
         (confidences, (user_indices, item_indices)),
         shape=(n_users, n_items),
         dtype=np.float32,
     )
-    logger.info("Built sparse training matrix C_ui of shape %s with %d non-zeros", C_ui.shape, C_ui.nnz)
+    logger.info(
+        "Built sparse training matrix C_ui of shape %s with %s non-zeros (%.1f min)",
+        C_ui.shape, f"{C_ui.nnz:,}", (time.monotonic() - stage_started) / 60,
+    )
 
     # 3. Fit implicit ALS model
     logger.info(
@@ -136,7 +149,9 @@ def train_and_generate_candidates(
         iterations=iterations,
         random_state=seed,
     )
-    model.fit(C_ui)
+    fit_started = time.monotonic()
+    model.fit(C_ui, show_progress=True)
+    logger.info("ALS fit complete in %.1f min", (time.monotonic() - fit_started) / 60)
 
     # 4. Extract and validate embedding artefacts
     user_factors = np.asarray(model.user_factors, dtype=np.float32)
@@ -194,11 +209,23 @@ def train_and_generate_candidates(
 
     # 6. Candidate Generation (Full Ranking with seen-item hard masking)
     logger.info("Generating top-%d candidates per evaluated user...", n_candidates)
-    records: List[Dict[str, object]] = []
     user_score_stds: List[float] = []
 
     # Batch full-ranking scoring
     batch_size = 250
+    candidates_started = time.monotonic()
+    last_progress = 0
+    item_ids = np.asarray(catalogue_item_ids, dtype=str)
+    pop_rank_values = np.asarray([pop_ranks.get(it, 999_999_999) for it in item_ids])
+    item_position = {it: i for i, it in enumerate(item_ids)}
+    output_path = os.path.join(results_dir, "baseline_scores.parquet")
+    output_schema = pa.schema([
+        ("userId", pa.string()),
+        ("itemId", pa.string()),
+        ("score", pa.float32()),
+        ("rank", pa.int16()),
+    ])
+    writer = None
     for start_idx in range(0, len(eval_users), batch_size):
         batch_users = eval_users[start_idx : start_idx + batch_size]
         batch_u_indices = [user2idx[u] for u in batch_users if u in user2idx]
@@ -209,40 +236,59 @@ def train_and_generate_candidates(
         batch_user_factors = user_factors[batch_u_indices]  # shape: (B, D)
         batch_scores = batch_user_factors @ item_factors.T  # shape: (B, I)
 
+        batch_rows = {"userId": [], "itemId": [], "score": [], "rank": []}
         for b_i, u in enumerate(batch_users):
+            if u not in user2idx:
+                continue
             seen_items = user_seen_dict.get(u, set())
             scores_u = batch_scores[b_i]
             user_score_stds.append(float(np.std(scores_u)))
 
-            # Exclude seen items
-            candidates = []
-            for item_idx, it_id in enumerate(catalogue_item_ids):
-                if it_id in seen_items:
-                    continue
-                sc = float(scores_u[item_idx])
-                p_rank = pop_ranks.get(it_id, 999_999_999)
-                candidates.append((sc, p_rank, it_id))
+            seen_positions = [item_position[it] for it in seen_items if it in item_position]
+            valid_mask = np.ones(len(item_ids), dtype=bool)
+            valid_mask[seen_positions] = False
+            valid_positions = np.flatnonzero(valid_mask)
+            if len(valid_positions) > n_candidates:
+                valid_scores = scores_u[valid_positions]
+                cutoff = np.partition(valid_scores, -n_candidates)[-n_candidates]
+                above = valid_positions[scores_u[valid_positions] > cutoff]
+                tied = valid_positions[scores_u[valid_positions] == cutoff]
+                needed = n_candidates - len(above)
+                tie_order = np.lexsort((item_ids[tied], pop_rank_values[tied]))
+                selected = np.concatenate((above, tied[tie_order[:needed]]))
+            else:
+                selected = valid_positions
 
-            # Deterministic sorting: score desc -> pop_rank asc -> itemId asc
-            candidates.sort(key=lambda x: (-x[0], x[1], x[2]))
-            top_cands = candidates[:n_candidates]
+            order = np.lexsort((item_ids[selected], pop_rank_values[selected], -scores_u[selected]))
+            top_positions = selected[order]
+            batch_rows["userId"].extend([str(u)] * len(top_positions))
+            batch_rows["itemId"].extend(item_ids[top_positions].tolist())
+            batch_rows["score"].extend(scores_u[top_positions].astype(np.float32).tolist())
+            batch_rows["rank"].extend(range(len(top_positions)))
 
-            for rank_idx, (sc, _, it_id) in enumerate(top_cands):
-                records.append({
-                    "userId": str(u),
-                    "itemId": str(it_id),
-                    "score": np.float32(sc),
-                    "rank": np.int16(rank_idx),  # 0-indexed: 0 = best, conforming to INTERFACE.md §2
-                })
+        table = pa.Table.from_pydict(batch_rows, schema=output_schema)
+        if writer is None:
+            writer = pq.ParquetWriter(output_path, output_schema)
+        writer.write_table(table)
+        completed = min(start_idx + len(batch_users), len(eval_users))
+        if completed - last_progress >= 10_000 or completed == len(eval_users):
+            elapsed = max(time.monotonic() - candidates_started, 1e-9)
+            logger.info(
+                "candidate generation: %s/%s users (%.1f%%), %.0f users/s, elapsed %.1f min",
+                f"{completed:,}", f"{len(eval_users):,}",
+                100 * completed / max(len(eval_users), 1), completed / elapsed, elapsed / 60,
+            )
+            last_progress = completed
 
-    baseline_scores_df = pd.DataFrame(records)
-    baseline_scores_path = os.path.join(results_dir, "baseline_scores.parquet")
-    baseline_scores_df.to_parquet(baseline_scores_path, index=False)
+    if writer is None:
+        writer = pq.ParquetWriter(output_path, output_schema)
+    writer.close()
+    baseline_scores_path = output_path
+    logger.info("Candidate generation complete in %.1f min", (time.monotonic() - candidates_started) / 60)
     logger.info(
-        "Saved baseline candidates to %s (%d candidate rows for %d users)",
+        "Saved baseline candidates to %s for %s users",
         baseline_scores_path,
-        len(baseline_scores_df),
-        len(eval_users),
+        f"{len(eval_users):,}",
     )
 
     # 7. Write run_manifest.json

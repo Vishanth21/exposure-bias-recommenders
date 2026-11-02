@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -66,97 +67,60 @@ def build_populations(train: pd.DataFrame) -> dict[str, pd.Index]:
     return out
 
 
-# --------------------------------------------------------------------------- candidate sets
+# --------------------------------------------------------------------------- recommendation construction
 
 
-def candidate_sets(
+def build_recommendations(
     users: pd.Index,
     catalogue: pd.Index,
     seen: dict[str, set[str]],
-) -> dict[str, np.ndarray]:
-    """Catalogue items minus each user's rated items, as a positional index array.
-
-    One array per user. Every item the user rated is excluded, low ratings included: a rated
-    item is observed, not a recommendation opportunity.
-    """
+    als_recs: dict[str, list[str]],
+    popularity_rank: dict[str, int],
+    candidate_count: int,
+    k: int,
+    seed: int = SEED,
+) -> dict[str, dict[str, list[str]]]:
+    """Keep only each user's metric prefix; the larger candidate pool is temporary."""
     catalogue_arr = catalogue.to_numpy()
     catalogue_set = set(catalogue_arr)
-    out: dict[str, np.ndarray] = {}
-    for user in users:
-        excluded = seen.get(user, set()) & catalogue_set
-        out[user] = catalogue_arr[~np.isin(catalogue_arr, list(excluded))] if excluded else catalogue_arr
-    return out
-
-
-def top_n(ordered_items: np.ndarray, ordered_scores: np.ndarray, n: int) -> list[int]:
-    """Top ``n`` item positions, ties broken by item position ascending for determinism."""
-    if len(ordered_items) <= n:
-        return ordered_items.tolist()
-    return ordered_items[:n].tolist()
-
-
-# --------------------------------------------------------------------------- recommenders
-
-
-def als_recommendations(
-    candidates: dict[str, np.ndarray],
-    user_factors: np.ndarray,
-    item_factors: np.ndarray,
-    user_index: dict[str, int],
-    item_index: dict[str, int],
-    catalogue: pd.Index,
-    n: int = N_CANDIDATES,
-) -> dict[str, list[int]]:
-    """Full-ranking ALS: score every catalogue item, take the top ``n``.
-
-    Only the candidate set is scored, so the result is a ranking over what the user could
-    still be shown. No negatives are sampled, which keeps NDCG unconditional on a sampled
-    subset.
-    """
-    out: dict[str, list[int]] = {}
-    for user, cand in candidates.items():
-        if not len(cand):
-            out[user] = []
-            continue
-        cand_pos = np.array([item_index[i] for i in cand])
-        scores = item_factors[cand_pos] @ user_factors[user_index[user]]
-        order = np.argsort(-scores, kind="stable")
-        out[user] = top_n(cand[order], scores[order], n)
-    return out
-
-
-def mostpop_recommendations(
-    candidates: dict[str, np.ndarray],
-    popularity_rank: dict[str, int],
-    n: int = N_CANDIDATES,
-) -> dict[str, list[int]]:
-    """Most popular catalogue items the user has not rated.
-
-    Ranked by ``popularity_rank`` so ties at low interaction counts are broken by the same
-    rule the popularity buckets use.
-    """
-    out: dict[str, list[int]] = {}
-    for user, cand in candidates.items():
-        order = sorted(cand.tolist(), key=lambda i: (popularity_rank[i], i))
-        out[user] = order[:n]
-    return out
-
-
-def random_recommendations(
-    candidates: dict[str, np.ndarray], n: int = N_CANDIDATES, seed: int = SEED
-) -> dict[str, list[int]]:
-    """Uniform sample of the candidate set, drawn from one seeded generator.
-
-    Users are iterated in a fixed order so the draw does not depend on dict construction.
-    """
+    mostpop_order = sorted(catalogue_arr.tolist(), key=lambda item: (popularity_rank[item], item))
     rng = np.random.default_rng(seed)
-    out: dict[str, list[int]] = {}
-    for user in sorted(candidates):
-        cand = candidates[user]
-        if len(cand) <= n:
-            out[user] = cand.tolist()
+    out = {"als": {}, "mostpop": {}, "random": {}}
+    started_at = time.monotonic()
+    last_progress = 0
+
+    for position, user in enumerate(users, start=1):
+        known = seen.get(user, set())
+        excluded = known & catalogue_set
+        available = (
+            catalogue_arr[~np.isin(catalogue_arr, list(excluded))]
+            if excluded
+            else catalogue_arr
+        )
+        out["als"][user] = als_recs.get(user, [])[:k]
+
+        best = []
+        for item in mostpop_order:
+            if item not in known:
+                best.append(item)
+                if len(best) == k:
+                    break
+        out["mostpop"][user] = best
+
+        if len(available) <= candidate_count:
+            sampled = available
         else:
-            out[user] = cand[rng.choice(len(cand), size=n, replace=False)].tolist()
+            sampled = available[rng.choice(len(available), size=candidate_count, replace=False)]
+        out["random"][user] = sampled[:k].tolist()
+
+        if position - last_progress >= 10_000 or position == len(users):
+            elapsed = max(time.monotonic() - started_at, 1e-9)
+            log.info(
+                "recommendations: %s/%s users (%.1f%%), %.0f users/s, elapsed %.1f min",
+                f"{position:,}", f"{len(users):,}",
+                100 * position / max(len(users), 1), position / elapsed, elapsed / 60,
+            )
+            last_progress = position
     return out
 
 
@@ -181,12 +145,23 @@ def score_population(
     positive, so NDCG and hitrate would be 0.0 by construction rather than by measurement.
     """
     rec_lists = [recs[u][:k] for u in users if recs.get(u)]
-    per_user_ndcg = {
-        u: ndcg_at_k(recs.get(u, []), relevant.get(u, set()), k) for u in users
-    }
-    per_user_hit = {
-        u: hitrate_at_k(recs.get(u, []), relevant.get(u, set()), k) for u in users
-    }
+    per_user_ndcg = {}
+    per_user_hit = {}
+    metrics_started = time.monotonic()
+    last_progress = 0
+    for position, user in enumerate(users, start=1):
+        user_relevant = relevant.get(user, set())
+        user_recs = recs.get(user, [])
+        per_user_ndcg[user] = ndcg_at_k(user_recs, user_relevant, k)
+        per_user_hit[user] = hitrate_at_k(user_recs, user_relevant, k)
+        if position - last_progress >= 10_000 or position == len(users):
+            elapsed = max(time.monotonic() - metrics_started, 1e-9)
+            log.info(
+                "per-user metrics: %s/%s users (%.1f%%), %.0f users/s, elapsed %.1f min",
+                f"{position:,}", f"{len(users):,}",
+                100 * position / max(len(users), 1), position / elapsed, elapsed / 60,
+            )
+            last_progress = position
 
     exposure = exposure_share(rec_lists, pop_bucket_of, buckets=POP_BUCKETS)
     out: dict = {"n_users": int(len(users))}
@@ -241,9 +216,14 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     RESULTS.mkdir(parents=True, exist_ok=True)
 
+    run_started = time.monotonic()
+    stage_started = time.monotonic()
     ratings = pd.read_parquet(PROCESSED / "ratings.parquet")
     items = pd.read_parquet(PROCESSED / "items.parquet")
-    factors = np.load(RESULTS / "model" / "als_factors.npz")
+    log.info(
+        "loaded ratings=%s and items=%s in %.1f min",
+        f"{len(ratings):,}", f"{len(items):,}", (time.monotonic() - stage_started) / 60,
+    )
 
     train = ratings[ratings["split"] == "train"]
     test = ratings[ratings["split"] == "test"]
@@ -254,9 +234,6 @@ def main(argv: list[str] | None = None) -> int:
     store_bucket_of = dict(zip(items["itemId"], items["store_bucket"]))
     popularity_of = dict(zip(items["itemId"], items["n_train_ratings"].astype(float)))
     popularity_rank = dict(zip(items["itemId"], items["popularity_rank"]))
-    item_index = {
-        item: i for i, item in enumerate(factors["item_ids"].astype(str))
-    }
 
     cat = items[items["in_catalogue"]]
     item_share = {
@@ -270,11 +247,19 @@ def main(argv: list[str] | None = None) -> int:
     seen: dict[str, set[str]] = observed_before_test.groupby("userId")["itemId"].agg(set).to_dict()
     relevant = test.groupby("userId")["itemId"].agg(set).to_dict()
 
-    user_index = {
-        user: i for i, user in enumerate(factors["user_ids"].astype(str))
-    }
-
     populations = build_populations(train)
+    stage_started = time.monotonic()
+    baseline_path = RESULTS / "baseline_scores.parquet"
+    als_top = pd.read_parquet(
+        baseline_path,
+        columns=["userId", "itemId", "rank"],
+        filters=[("rank", "<", args.k)],
+    ).sort_values(["userId", "rank"])
+    als_recs = als_top.groupby("userId")["itemId"].apply(list).to_dict()
+    log.info(
+        "loaded top-%d ALS candidates for %s users in %.1f min",
+        args.k, f"{len(als_recs):,}", (time.monotonic() - stage_started) / 60,
+    )
 
     result: dict = {
         "k": args.k,
@@ -285,30 +270,27 @@ def main(argv: list[str] | None = None) -> int:
 
     for pop_name, users in populations.items():
         log.info("scoring %s (%d users)", pop_name, len(users))
-        candidates = candidate_sets(users, catalogue, seen)
+        stage_started = time.monotonic()
+        model_recs = build_recommendations(
+            users, catalogue, seen, als_recs, popularity_rank,
+            args.n_candidates, args.k,
+        )
+        log.info("%s recommendations ready in %.1f min", pop_name, (time.monotonic() - stage_started) / 60)
         with_relevance = pop_name == "relevance_pop"
-
-        model_recs: dict[str, dict[str, list[int]]] = {
-            "als": als_recommendations(
-                candidates, factors["user_factors"], factors["item_factors"],
-                user_index, item_index, catalogue, args.n_candidates,
-            ),
-            "mostpop": mostpop_recommendations(
-                candidates, popularity_rank, args.n_candidates
-            ),
-            "random": random_recommendations(
-                candidates, args.n_candidates
-            ),
-        }
 
         blocks: dict[str, dict] = {}
         for model_name, recs in model_recs.items():
+            stage_started = time.monotonic()
             scored = score_population(
                 users, recs, relevant, pop_bucket_of, store_bucket_of, popularity_of,
                 item_share, catalogue, with_relevance, args.k,
             )
             per_user = scored.pop("_per_user")
             blocks[model_name] = scored
+            log.info(
+                "%s/%s metrics complete in %.1f min",
+                pop_name, model_name, (time.monotonic() - stage_started) / 60,
+            )
             # One row per user; only the ALS rows belong in the baseline per-user table,
             # since the baselines are not the sweep's subject.
             if model_name == "als":
@@ -344,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
 
     (RESULTS / "baseline_metrics.json").write_text(json.dumps(result, indent=2) + "\n")
     log.info("wrote %s", RESULTS / "baseline_metrics.json")
+    log.info("evaluation complete in %.1f min", (time.monotonic() - run_started) / 60)
     return 0
 
 

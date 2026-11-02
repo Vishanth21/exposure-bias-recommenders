@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+import time
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -35,6 +36,8 @@ SUPPORTED_CATEGORIES = {
 }
 
 TIMESTAMP_MS_THRESHOLD = 1e11
+STREAM_BATCH_SIZE = 10_000
+PROGRESS_INTERVAL = 100_000
 
 
 def extract_store(meta: pd.DataFrame) -> pd.Series:
@@ -65,6 +68,17 @@ def _normalise_price(value: object) -> float:
     except (TypeError, ValueError, OverflowError):
         return float("nan")
     return price if np.isfinite(price) else float("nan")
+
+
+def _log_stream_progress(kind: str, count: int, started_at: float) -> None:
+    elapsed = max(time.monotonic() - started_at, 1e-9)
+    logger.info(
+        "%s: streamed %s rows in %.1f min (%.0f rows/s)",
+        kind,
+        f"{count:,}",
+        elapsed / 60,
+        count / elapsed,
+    )
 
 
 def _generate_synthetic_reviews(n_users: int = 1500, n_items: int = 400, n_interactions: int = 8000, seed: int = 42) -> pd.DataFrame:
@@ -131,28 +145,49 @@ def load_reviews(category: str = "Electronics", limit: int | None = None) -> pd.
     if category not in SUPPORTED_CATEGORIES:
         raise ValueError(f"Category '{category}' is not supported. Supported: {sorted(SUPPORTED_CATEGORIES)}")
 
-    # Check for local raw cache
+    started_at = time.monotonic()
     cache_path = os.path.join("data", "raw", f"{category}_reviews.parquet")
+    cacheable = False
     if os.path.exists(cache_path):
+        logger.info("reviews: reading local cache %s", cache_path)
         df = pd.read_parquet(cache_path)
     else:
-        # Try loading via Hugging Face datasets if available
+        logger.info(
+            "reviews: opening Hugging Face stream for %s (limit=%s, batch=%s)",
+            category,
+            limit if limit is not None else "all",
+            f"{STREAM_BATCH_SIZE:,}",
+        )
         try:
             from datasets import load_dataset  # type: ignore
             ds = load_dataset(f"McAuley-Lab/Amazon-Reviews-2023", f"raw_review_{category}", split="full", streaming=True, trust_remote_code=True)
-            records = []
-            for i, row in enumerate(ds):
-                if limit is not None and i >= limit:
+            logger.info("reviews: stream opened; reading batches")
+            columns = {"user_id": [], "parent_asin": [], "rating": [], "timestamp": []}
+            count = 0
+            last_logged = 0
+            for batch in ds.batch(batch_size=STREAM_BATCH_SIZE):
+                batch_count = len(batch["user_id"])
+                if limit is not None:
+                    batch_count = min(batch_count, limit - count)
+                if batch_count <= 0:
                     break
-                records.append({
-                    "user_id": str(row["user_id"]),
-                    "parent_asin": str(row["parent_asin"]),
-                    "rating": float(row["rating"]),
-                    "timestamp": int(row["timestamp"]),
-                })
-            df = pd.DataFrame(records)
+                for name in columns:
+                    columns[name].extend(batch[name][:batch_count])
+                count += batch_count
+                if count - last_logged >= PROGRESS_INTERVAL:
+                    _log_stream_progress("reviews", count, started_at)
+                    last_logged = count
+                if limit is not None and count >= limit:
+                    break
+            df = pd.DataFrame(columns)
+            _log_stream_progress("reviews complete", count, started_at)
+            cacheable = True
         except Exception as e:
-            logger.info("HF datasets unavailable or offline (%s); using deterministic synthetic data for category %s", e, category)
+            logger.exception(
+                "reviews: Hugging Face stream failed; using deterministic synthetic data for category %s (%s)",
+                category,
+                e,
+            )
             df = _generate_synthetic_reviews(n_users=1500, n_items=400, n_interactions=8000)
 
     if limit is not None and len(df) > limit:
@@ -171,6 +206,15 @@ def load_reviews(category: str = "Electronics", limit: int | None = None) -> pd.
                 f"timestamp values appear to be in seconds, not milliseconds (median={median_ts:.0f} <= {TIMESTAMP_MS_THRESHOLD:.0f})"
             )
 
+    if limit is None and cacheable and not os.path.exists(cache_path):
+        cache_started = time.monotonic()
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        df.to_parquet(cache_path, index=False)
+        logger.info(
+            "reviews: cached %s rows at %s (%.1f min)",
+            f"{len(df):,}", cache_path, (time.monotonic() - cache_started) / 60,
+        )
+
     return df
 
 
@@ -181,28 +225,63 @@ def load_metadata(category: str = "Electronics", limit: int | None = None) -> pd
     if category not in SUPPORTED_CATEGORIES:
         raise ValueError(f"Category '{category}' is not supported. Supported: {sorted(SUPPORTED_CATEGORIES)}")
 
+    started_at = time.monotonic()
     cache_path = os.path.join("data", "raw", f"{category}_metadata.parquet")
+    cacheable = False
     if os.path.exists(cache_path):
+        logger.info("metadata: reading local cache %s", cache_path)
         df = pd.read_parquet(cache_path)
     else:
-        # Try loading via Hugging Face datasets
+        logger.info(
+            "metadata: opening Hugging Face stream for %s (limit=%s, batch=%s)",
+            category,
+            limit if limit is not None else "all",
+            f"{STREAM_BATCH_SIZE:,}",
+        )
         try:
             from datasets import load_dataset  # type: ignore
             ds = load_dataset(f"McAuley-Lab/Amazon-Reviews-2023", f"raw_meta_{category}", split="full", streaming=True, trust_remote_code=True)
-            records = []
-            for i, row in enumerate(ds):
-                if limit is not None and i >= limit:
+            logger.info("metadata: stream opened; reading batches")
+            columns = {
+                "parent_asin": [],
+                "title": [],
+                "store": [],
+                "main_category": [],
+                "price": [],
+            }
+            count = 0
+            last_logged = 0
+            for batch in ds.batch(batch_size=STREAM_BATCH_SIZE):
+                batch_count = len(batch["parent_asin"])
+                if limit is not None:
+                    batch_count = min(batch_count, limit - count)
+                if batch_count <= 0:
                     break
-                records.append({
-                    "parent_asin": str(row.get("parent_asin", "")),
-                    "title": str(row.get("title", "")),
-                    "store": str(row.get("store", "") or ""),
-                    "main_category": str(row.get("main_category", category)),
-                    "price": _normalise_price(row.get("price")),
-                })
-            df = pd.DataFrame(records)
+                columns["parent_asin"].extend(batch["parent_asin"][:batch_count])
+                columns["title"].extend(batch.get("title", [""] * batch_count)[:batch_count])
+                columns["store"].extend(batch.get("store", [""] * batch_count)[:batch_count])
+                columns["main_category"].extend(
+                    batch.get("main_category", [category] * batch_count)[:batch_count]
+                )
+                columns["price"].extend(
+                    _normalise_price(value)
+                    for value in batch.get("price", [None] * batch_count)[:batch_count]
+                )
+                count += batch_count
+                if count - last_logged >= PROGRESS_INTERVAL:
+                    _log_stream_progress("metadata", count, started_at)
+                    last_logged = count
+                if limit is not None and count >= limit:
+                    break
+            df = pd.DataFrame(columns)
+            _log_stream_progress("metadata complete", count, started_at)
+            cacheable = True
         except Exception as e:
-            logger.info("HF datasets unavailable or offline (%s); using synthetic metadata for category %s", e, category)
+            logger.exception(
+                "metadata: Hugging Face stream failed; using synthetic metadata for category %s (%s)",
+                category,
+                e,
+            )
             # Create metadata matching synthetic reviews
             rev_df = load_reviews(category=category, limit=limit)
             unique_items = sorted(rev_df["parent_asin"].unique().tolist())
@@ -219,6 +298,15 @@ def load_metadata(category: str = "Electronics", limit: int | None = None) -> pd
     if "price" not in df.columns:
         df["price"] = np.nan
     df["price"] = df["price"].astype(np.float32)
+
+    if limit is None and cacheable and not os.path.exists(cache_path):
+        cache_started = time.monotonic()
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        df.to_parquet(cache_path, index=False)
+        logger.info(
+            "metadata: cached %s rows at %s (%.1f min)",
+            f"{len(df):,}", cache_path, (time.monotonic() - cache_started) / 60,
+        )
 
     return df
 

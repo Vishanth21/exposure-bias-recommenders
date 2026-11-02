@@ -14,6 +14,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -361,8 +362,32 @@ def main(argv: list[str] | None = None) -> int:
     PROCESSED.mkdir(parents=True, exist_ok=True)
     RESULTS.mkdir(parents=True, exist_ok=True)
 
+    run_started = time.monotonic()
+    log.info(
+        "prepare started: category=%s review_limit=%s metadata_limit=%s",
+        args.category,
+        args.limit if args.limit is not None else "all",
+        args.limit if args.limit is not None else "all",
+    )
+
+    stage_started = time.monotonic()
     reviews = load_reviews(category=args.category, limit=args.limit)
+    log.info(
+        "reviews ready: %s rows, %s users, %s items (%.1f min)",
+        f"{len(reviews):,}",
+        f"{reviews['user_id'].nunique():,}",
+        f"{reviews['parent_asin'].nunique():,}",
+        (time.monotonic() - stage_started) / 60,
+    )
+
+    stage_started = time.monotonic()
     meta = load_metadata(category=args.category, limit=args.limit)
+    log.info(
+        "metadata ready: %s rows, %s distinct items (%.1f min)",
+        f"{len(meta):,}",
+        f"{meta['parent_asin'].nunique():,}",
+        (time.monotonic() - stage_started) / 60,
+    )
 
     # Ratings are the observed rating distribution: the >= 4 threshold is only informative
     # if it is not near-vacuous, and the card does not state the value set.
@@ -371,15 +396,36 @@ def main(argv: list[str] | None = None) -> int:
         reviews["rating"].value_counts().sort_index().to_dict(),
     )
 
+    stage_started = time.monotonic()
     reviews = assign_splits(reviews)
-    ratings, items = build_items(reviews, meta)
+    log.info(
+        "temporal split ready: train=%s test=%s seen=%s (%.1f min)",
+        f"{int((reviews['split'] == SPLIT_TRAIN).sum()):,}",
+        f"{int((reviews['split'] == SPLIT_TEST).sum()):,}",
+        f"{int((reviews['split'] == SPLIT_SEEN).sum()):,}",
+        (time.monotonic() - stage_started) / 60,
+    )
 
+    stage_started = time.monotonic()
+    ratings, items = build_items(reviews, meta)
+    log.info(
+        "tables built: ratings=%s rows, items=%s rows, catalogue=%s (%.1f min)",
+        f"{len(ratings):,}",
+        f"{len(items):,}",
+        f"{int(items['in_catalogue'].sum()):,}",
+        (time.monotonic() - stage_started) / 60,
+    )
+
+    stage_started = time.monotonic()
     ratings.to_parquet(PROCESSED / "ratings.parquet", index=False)
     items.to_parquet(PROCESSED / "items.parquet", index=False)
+    log.info("parquet files written (%.1f min)", (time.monotonic() - stage_started) / 60)
 
+    stage_started = time.monotonic()
     funnel = build_funnel(reviews, ratings, items)
     funnel["category"] = args.category
     (RESULTS / "prepare_funnel.json").write_text(json.dumps(funnel, indent=2) + "\n")
+    log.info("prepare funnel written (%.1f min)", (time.monotonic() - stage_started) / 60)
 
     large = funnel["store_buckets"]["large"]
     log.info(
@@ -389,6 +435,7 @@ def main(argv: list[str] | None = None) -> int:
         large["store_share"],
         large["item_share"],
     )
+    log.info("prepare complete in %.1f min", (time.monotonic() - run_started) / 60)
     return 0
 
 

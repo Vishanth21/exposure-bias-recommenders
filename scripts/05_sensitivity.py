@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sys
+import time
 from typing import Dict, List, Sequence
 
 # Ensure repository root is on sys.path
@@ -44,12 +45,23 @@ def compute_sensitivity_analysis(
     gamma_values: Sequence[float] = DEFAULT_GAMMA_VALUES,
     k: int = DEFAULT_EVAL_K,
 ) -> Dict[str, object]:
+    run_started = time.monotonic()
     os.makedirs(results_dir, exist_ok=True)
 
+    stage_started = time.monotonic()
     logger.info("Loading artefacts for sensitivity analysis...")
-    scores_df = pd.read_parquet(baseline_scores_path)
+    scores_df = pd.read_parquet(
+        baseline_scores_path,
+        columns=["userId", "itemId", "rank"],
+        filters=[("rank", "<", k)],
+    )
     ratings_df = pd.read_parquet(ratings_path)
     items_df = pd.read_parquet(items_path)
+    logger.info(
+        "Loaded candidate_rows=%s, ratings=%s, items=%s (%.1f min)",
+        f"{len(scores_df):,}", f"{len(ratings_df):,}", f"{len(items_df):,}",
+        (time.monotonic() - stage_started) / 60,
+    )
 
     with open(baseline_metrics_path, "r", encoding="utf-8") as f:
         baseline_metrics = json.load(f)
@@ -77,7 +89,9 @@ def compute_sensitivity_analysis(
 
     # Precompute per-user unweighted metrics and test item popularities
     user_metrics: List[Dict[str, float]] = []
-    for u in rel_users:
+    metrics_started = time.monotonic()
+    last_progress = 0
+    for position, u in enumerate(rel_users, start=1):
         recs_u = user_candidates[u][:k]
         test_item = test_ground_truth[u]
         target = [test_item]
@@ -91,6 +105,14 @@ def compute_sensitivity_analysis(
             "hit": hit_u,
             "pop": pop_item,
         })
+        if position - last_progress >= 10_000 or position == len(rel_users):
+            elapsed = max(time.monotonic() - metrics_started, 1e-9)
+            logger.info(
+                "sensitivity metrics: %s/%s users (%.1f%%), %.0f users/s, elapsed %.1f min",
+                f"{position:,}", f"{len(rel_users):,}",
+                100 * position / max(len(rel_users), 1), position / elapsed, elapsed / 60,
+            )
+            last_progress = position
 
     rel_metrics_by_gamma: Dict[str, Dict[str, float]] = {}
     baseline_ndcg = baseline_metrics["relevance_pop"]["ndcg"]
@@ -150,6 +172,7 @@ def compute_sensitivity_analysis(
     with open(sensitivity_path, "w", encoding="utf-8") as f:
         json.dump(sensitivity_result, f, indent=2)
     logger.info("Saved sensitivity analysis to %s", sensitivity_path)
+    logger.info("sensitivity analysis complete in %.1f min", (time.monotonic() - run_started) / 60)
 
     return sensitivity_result
 
