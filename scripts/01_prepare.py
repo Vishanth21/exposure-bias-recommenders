@@ -220,7 +220,8 @@ def build_items(
     items["in_catalogue"] = items["n_train_ratings"] >= CATALOGUE_MIN_TRAIN
 
     catalogue = items[items["in_catalogue"]]
-    ranks = catalogue["n_train_ratings"].rank(method="first", ascending=False)
+    # rank() is 1-based; the contract has 0 = most popular. Only relative order is used downstream.
+    ranks = catalogue["n_train_ratings"].rank(method="first", ascending=False) - 1
     # Unranked (non-catalogue) items get -1 so the column stays int32 without a nullable dtype.
     items["popularity_rank"] = ranks.reindex(items.index).fillna(-1).astype("int32")
 

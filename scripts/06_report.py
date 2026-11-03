@@ -5,8 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from pathlib import Path
 from typing import Any
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 import matplotlib
 
@@ -82,6 +89,18 @@ def print_table(title: str, headers: list[str], rows: list[list[str]]) -> None:
         print("| " + " | ".join(row) + " |")
 
 
+def _lambda_axis(ax, lambdas: list[float]) -> list[int]:
+    """Evenly spaced λ positions: the grid is non-uniform, so real spacing crushes 0 and 0.1."""
+    positions = list(range(len(lambdas)))
+    ax.set_xticks(positions, [f"{value:g}" for value in lambdas])
+    ax.set_xlabel("λ")
+    return positions
+
+
+def _format_metric(value: float) -> str:
+    return f"{value:.4f}" if value >= 1e-3 else f"{value:.1e}"
+
+
 def plot_baseline_quality(baseline: dict[str, Any], output: Path) -> None:
     names = ["ALS", "MostPop", "Random"]
     metrics = {name: baseline["relevance_pop"] for name in names[:1]}
@@ -97,13 +116,16 @@ def plot_baseline_quality(baseline: dict[str, Any], output: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 4.8), layout="constrained")
     x = list(range(len(names)))
     width = 0.36
-    ax.bar([position - width / 2 for position in x], ndcg, width, label="NDCG@10")
-    ax.bar([position + width / 2 for position in x], hitrate, width, label="HitRate@10")
+    # Scores are ~0.01 on a full-catalogue ranking, so the axis is scaled to the data
+    # (a 0-1 axis renders every bar as empty) and each bar carries its value.
+    for offset, values, label in ((-width / 2, ndcg, "NDCG@10"), (width / 2, hitrate, "HitRate@10")):
+        bars = ax.bar([position + offset for position in x], values, width, label=label)
+        ax.bar_label(bars, labels=[_format_metric(value) for value in values], padding=3, fontsize=9)
     ax.set_xticks(x, names)
-    ax.set_ylabel("Score")
-    ax.set_ylim(0, 1)
-    ax.set_title("Baseline relevance quality")
-    ax.legend()
+    ax.set_ylabel("Score (full ranking over the catalogue)")
+    ax.set_ylim(0, max(hitrate) * 1.2)
+    ax.set_title("Baseline relevance quality (relevance population)")
+    ax.legend(loc="upper right")
     fig.savefig(output, dpi=160)
     plt.close(fig)
 
@@ -112,22 +134,27 @@ def plot_reranker_tradeoff(rerank: dict[str, Any], chosen: float | None, output:
     exposure = sorted(rerank["exposure_pop"], key=lambda row: row["lambda"])
     relevance = sorted(rerank["relevance_pop"], key=lambda row: row["lambda"])
     lambdas = [float(row["lambda"]) for row in exposure]
+    popularity = [float(row["mean_recommended_popularity"]) for row in exposure]
     tail = [float(row["exposure_share"]["tail"]) for row in exposure]
     ndcg = [float(row["ndcg"]) for row in relevance]
 
     fig, left = plt.subplots(figsize=(8, 4.8), layout="constrained")
     right = left.twinx()
-    left.plot(lambdas, tail, marker="o", color="tab:blue", label="Tail exposure share")
-    right.plot(lambdas, ndcg, marker="s", color="tab:orange", label="NDCG@10")
-    if chosen is not None:
-        left.axvline(chosen, color="0.4", linestyle="--", linewidth=1, label="Chosen λ")
-    left.set_xlabel("λ")
-    left.set_ylabel("Tail exposure share")
+    x = _lambda_axis(left, lambdas)
+    # Tail share is identically 0 across the sweep, so it is stated as text rather than
+    # drawn as a flat line on an axis centred on zero, which reads as a broken plot.
+    left.plot(x, popularity, marker="o", color="tab:blue", label="Mean recommended popularity")
+    right.plot(x, ndcg, marker="s", color="tab:orange", label="NDCG@10")
+    if chosen is not None and chosen in lambdas:
+        left.axvline(lambdas.index(chosen), color="0.4", linestyle="--", linewidth=1, label="Chosen λ")
+    left.set_ylim(0, max(popularity) * 1.1)
+    left.set_ylabel("Mean train interactions per recommended item")
     right.set_ylabel("NDCG@10")
-    left.set_xticks(lambdas)
     left.set_title("Re-ranking trade-off across the full λ sweep")
+    tail_note = "Tail exposure share = 0 at every λ" if max(tail) == 0 else f"Max tail share {max(tail):.2%}"
+    left.text(0.02, 0.04, tail_note, transform=left.transAxes, fontsize=9, color="0.3")
     lines = left.get_lines() + right.get_lines()
-    left.legend(lines, [line.get_label() for line in lines], loc="best")
+    left.legend(lines, [line.get_label() for line in lines], loc="lower left", bbox_to_anchor=(0, 0.1))
     fig.savefig(output, dpi=160)
     plt.close(fig)
 
@@ -140,15 +167,14 @@ def plot_popularity_exposure(
     bucket_names = ("head", "mid", "tail")
     fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharey=True, layout="constrained")
     for ax, bucket in zip(axes, bucket_names):
+        x = _lambda_axis(ax, lambdas)
         values = [float(row["exposure_share"][bucket]) for row in rows]
         item_share = float(funnel["buckets"][bucket]["item_share"])
-        ax.plot(lambdas, values, marker="o", label="Exposure share")
+        ax.plot(x, values, marker="o", label="Exposure share")
         ax.axhline(item_share, color="0.45", linestyle="--", label="Catalogue item share")
-        ax.set_title(bucket.capitalize())
-        ax.set_xlabel("λ")
-        ax.set_xticks(lambdas)
+        ax.set_title(f"{bucket.capitalize()} (λ=2: {values[-1]:.2%} of slots)")
     axes[0].set_ylabel("Share of recommendation slots")
-    axes[-1].legend(loc="best", fontsize="small")
+    axes[-1].legend(loc="center right", fontsize="small")
     fig.suptitle("Exposure by popularity bucket")
     fig.savefig(output, dpi=160)
     plt.close(fig)
@@ -159,24 +185,17 @@ def plot_store_exposure(
 ) -> None:
     rows = sorted(rerank["exposure_pop"], key=lambda row: row["lambda"])
     lambdas = [float(row["lambda"]) for row in rows]
-    buckets = ("large", "small", "unknown")
+    colors = {"large": "tab:blue", "small": "tab:orange", "unknown": "tab:green"}
     fig, ax = plt.subplots(figsize=(8, 4.8), layout="constrained")
-    for bucket in buckets:
+    x = _lambda_axis(ax, lambdas)
+    for bucket, color in colors.items():
         values = [float(row["store_exposure_share"][bucket]) for row in rows]
         item_share = float(funnel["store_buckets"][bucket]["item_share"])
-        ax.plot(lambdas, values, marker="o", label=f"{bucket} exposure")
-        ax.axhline(
-            item_share,
-            linestyle="--",
-            linewidth=0.8,
-            alpha=0.55,
-            label=f"{bucket} catalogue share",
-        )
-    ax.set_xlabel("λ")
+        ax.plot(x, values, marker="o", color=color, label=f"{bucket} exposure")
+        ax.axhline(item_share, color=color, linestyle="--", linewidth=1, label=f"{bucket} catalogue share")
     ax.set_ylabel("Share of recommendation slots")
-    ax.set_xticks(lambdas)
     ax.set_title("Seller-bucket exposure and catalogue share")
-    ax.legend()
+    ax.legend(loc="center right", fontsize="small")
     fig.savefig(output, dpi=160)
     plt.close(fig)
 

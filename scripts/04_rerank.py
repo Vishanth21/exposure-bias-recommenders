@@ -352,6 +352,9 @@ def run_reranking_sweep(
 
     # Save per_user_metrics.parquet
     per_user_df = pd.DataFrame(per_user_records, columns=["userId", "population", "lambda", "ndcg", "hit"])
+    per_user_df["lambda"] = per_user_df["lambda"].round(2).astype("float64")
+    per_user_df["ndcg"] = per_user_df["ndcg"].astype("float64")
+    per_user_df["hit"] = per_user_df["hit"].astype("float64")
     per_user_path = os.path.join(results_dir, "per_user_metrics.parquet")
     per_user_df.to_parquet(per_user_path, index=False)
     logger.info("Saved per-user metrics to %s (%d rows)", per_user_path, len(per_user_df))
