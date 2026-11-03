@@ -340,10 +340,12 @@ def load_metadata(category: str = "Electronics", limit: int | None = None) -> pd
         df = df.iloc[:limit].copy()
 
     df["parent_asin"] = df["parent_asin"].astype(str)
-    df["title"] = df["title"].astype(str)
+    # Missing title / main_category -> "" (INTERFACE §1a); astype(str) alone turns None into "None".
+    df["title"] = df["title"].fillna("").astype(str)
     df["store"] = extract_store(df).values
     if "main_category" not in df.columns:
         df["main_category"] = category
+    df["main_category"] = df["main_category"].fillna("").astype(str)
     if "price" not in df.columns:
         df["price"] = np.nan
     df["price"] = df["price"].astype(np.float32)

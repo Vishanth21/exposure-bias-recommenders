@@ -364,6 +364,9 @@ def main(argv: list[str] | None = None) -> int:
             }
 
     per_user_frame = pd.concat(per_user_rows, ignore_index=True)
+    per_user_frame["lambda"] = per_user_frame["lambda"].astype("float64")
+    per_user_frame["ndcg"] = per_user_frame["ndcg"].astype("float64")
+    per_user_frame["hit"] = per_user_frame["hit"].astype("float64")
     per_user_frame.to_parquet(results_dir / "per_user_metrics.parquet", index=False)
     log.info("wrote %s (%d rows)", results_dir / "per_user_metrics.parquet", len(per_user_frame))
 

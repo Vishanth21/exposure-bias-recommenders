@@ -1,0 +1,1529 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Plan — Exposure Bias in Large Recommenders</title>
+    <style>
+      :root {
+        --bg: #fbfbfa;
+        --surface: #ffffff;
+        --ink: #1c1c1a;
+        --muted: #5f5f5a;
+        --rule: #e2e2dd;
+        --accent: #1f5f8b;
+        --accent-soft: #eef4f9;
+        --warn-bg: #fdf6e8;
+        --warn-rule: #e8d5a8;
+        --code-bg: #f4f4f1;
+        --mono:
+          ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 3rem 1.5rem 6rem;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          16px/1.62 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Inter,
+          Roboto,
+          "Helvetica Neue",
+          Arial,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap {
+        max-width: 62rem;
+        margin: 0 auto;
+      }
+      header.page {
+        border-bottom: 2px solid var(--ink);
+        padding-bottom: 1.4rem;
+        margin-bottom: 2.6rem;
+      }
+      h1 {
+        font-size: 2rem;
+        line-height: 1.2;
+        letter-spacing: -0.02em;
+        margin: 0 0 0.7rem;
+        font-weight: 700;
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 0.9rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem 1.4rem;
+      }
+      .meta b {
+        color: var(--ink);
+        font-weight: 600;
+      }
+      .badge {
+        display: inline-block;
+        background: var(--warn-bg);
+        border: 1px solid var(--warn-rule);
+        border-radius: 999px;
+        padding: 0.12rem 0.7rem;
+        font-size: 0.78rem;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        color: #7a5c14;
+      }
+      h2 {
+        font-size: 1.3rem;
+        letter-spacing: -0.01em;
+        margin: 3rem 0 1rem;
+        padding-bottom: 0.45rem;
+        border-bottom: 1px solid var(--rule);
+        font-weight: 650;
+      }
+      h2 .num {
+        color: var(--accent);
+        font-variant-numeric: tabular-nums;
+        margin-right: 0.5rem;
+      }
+      h3 {
+        font-size: 1.02rem;
+        margin: 1.8rem 0 0.6rem;
+        font-weight: 650;
+      }
+      p {
+        margin: 0 0 1rem;
+      }
+      a {
+        color: var(--accent);
+      }
+
+      blockquote {
+        margin: 1.4rem 0;
+        padding: 1rem 1.3rem;
+        background: var(--accent-soft);
+        border-left: 4px solid var(--accent);
+        border-radius: 0 6px 6px 0;
+        font-size: 1.02rem;
+      }
+      blockquote p:last-child {
+        margin-bottom: 0;
+      }
+
+      .table-scroll {
+        overflow-x: auto;
+        margin: 1.2rem 0 1.6rem;
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.9rem;
+      }
+      th,
+      td {
+        text-align: left;
+        vertical-align: top;
+        padding: 0.7rem 0.85rem;
+        border-bottom: 1px solid var(--rule);
+      }
+      thead th {
+        background: #f6f6f3;
+        font-weight: 650;
+        font-size: 0.78rem;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+      tbody tr:hover {
+        background: #fafaf8;
+      }
+      td.num {
+        font-variant-numeric: tabular-nums;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      td strong {
+        font-weight: 650;
+      }
+
+      .who {
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .due {
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      .due.freeze {
+        color: #8a3d1f;
+        font-weight: 650;
+      }
+      .dash {
+        color: #c2c2bc;
+      }
+
+      pre {
+        background: var(--code-bg);
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        padding: 1rem 1.1rem;
+        overflow-x: auto;
+        font: 0.84rem/1.6 var(--mono);
+        margin: 1rem 0 1.5rem;
+      }
+      pre code {
+        background: none;
+        padding: 0;
+        border: none;
+        font-size: inherit;
+      }
+      code {
+        font: 0.87em/1.5 var(--mono);
+        background: var(--code-bg);
+        border: 1px solid var(--rule);
+        border-radius: 4px;
+        padding: 0.08em 0.35em;
+      }
+
+      ul,
+      ol {
+        margin: 0 0 1rem;
+        padding-left: 1.4rem;
+      }
+      li {
+        margin-bottom: 0.4rem;
+      }
+
+      .risks {
+        list-style: none;
+        padding: 0;
+        margin: 1.2rem 0;
+      }
+      .risks li {
+        background: var(--surface);
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        padding: 0.85rem 1rem;
+        margin-bottom: 0.6rem;
+        font-size: 0.92rem;
+      }
+      .risks .lvl {
+        display: inline-block;
+        font-size: 0.7rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        border-radius: 4px;
+        padding: 0.1rem 0.45rem;
+        margin-right: 0.55rem;
+        vertical-align: 0.1em;
+      }
+      .lvl.med {
+        background: #fdf0e3;
+        color: #8a5320;
+        border: 1px solid #eed3b4;
+      }
+      .lvl.low {
+        background: #eaf3ec;
+        color: #2f6138;
+        border: 1px solid #c6dfcb;
+      }
+
+      .callout {
+        background: var(--surface);
+        border: 1px solid var(--rule);
+        border-left: 4px solid var(--ink);
+        border-radius: 0 8px 8px 0;
+        padding: 1rem 1.2rem;
+        margin: 1.4rem 0;
+        font-size: 0.94rem;
+      }
+      .callout p:last-child {
+        margin-bottom: 0;
+      }
+
+      .questions {
+        list-style: none;
+        counter-reset: q;
+        padding: 0;
+      }
+      .questions li {
+        counter-increment: q;
+        position: relative;
+        padding: 0.85rem 1rem 0.85rem 3rem;
+        background: var(--surface);
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        margin-bottom: 0.6rem;
+      }
+      .questions li::before {
+        content: "Q" counter(q);
+        position: absolute;
+        left: 0.85rem;
+        top: 0.85rem;
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        color: var(--accent);
+      }
+      .questions li em {
+        display: block;
+        color: var(--muted);
+        font-size: 0.85rem;
+        font-style: normal;
+        margin-top: 0.25rem;
+      }
+
+      footer.page {
+        margin-top: 4rem;
+        padding-top: 1.2rem;
+        border-top: 1px solid var(--rule);
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      @media print {
+        body {
+          padding: 0;
+          background: #fff;
+          font-size: 10.5pt;
+        }
+        .table-scroll,
+        .questions li,
+        pre {
+          break-inside: avoid;
+        }
+        .flow td {
+          vertical-align: top;
+          font-size: 0.92rem;
+        }
+        .flow tr.done {
+          background: #f0f7f0;
+        }
+        .flow tr.done td code {
+          color: #4a6b4a;
+        }
+        .flow .num {
+          font-weight: 700;
+          color: var(--muted);
+          width: 2.2rem;
+        }
+        .chain {
+          font-size: 0.82rem;
+          line-height: 1.45;
+        }
+        h2 {
+          break-after: avoid;
+        }
+        a {
+          color: var(--ink);
+        }
+      }
+
+      .tag {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+      }
+      .tag.ok {
+        background: #dcfce7;
+        color: #166534;
+        border: 1px solid #86efac;
+      }
+      .tag.def {
+        background: rgba(90, 140, 200, 0.14);
+        color: #9dc0e8;
+        border: 1px solid rgba(90, 140, 200, 0.35);
+      }
+      .tag.open {
+        background: #fef3c7;
+        color: #92400e;
+        border: 1px solid #fcd34d;
+      }
+
+      pre.flow {
+        background: #0f172a;
+        color: #e2e8f0;
+        padding: 16px 18px;
+        border-radius: 8px;
+        overflow-x: auto;
+        font-size: 12.5px;
+        line-height: 1.65;
+        margin: 14px 0;
+      }
+      pre.flow code {
+        background: none;
+        color: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="page">
+        <h1>Exposure Bias in Large Recommenders</h1>
+        <div class="meta">
+          <span><b>Dataset:</b> Amazon Reviews 2023</span>
+          <span
+            ><b>Model:</b> <code>implicit</code> ALS + post-hoc re-ranker</span
+          >
+          <span><b>Split:</b> temporal leave-last-out</span>
+          <span><b>Presentation:</b> 02-11-2026</span>
+          <span
+            ><b>Repo:</b>
+            <a href="https://github.com/Vishanth21/exposure-bias-recommenders"
+              ><code>Vishanth21/exposure-bias-recommenders</code></a
+            ></span
+          >
+        </div>
+      </header>
+
+      <blockquote>
+        <p>
+          We train a standard matrix-factorisation recommender on Amazon Reviews
+          2023 and show it over-exposes a small set of popular titles; we then
+          add a post-hoc re-ranker that taxes popular items and reallocates
+          exposure to the long tail, and we report exactly what that costs in
+          user relevance.
+        </p>
+      </blockquote>
+
+      <p>
+        <b>Presentation is 02-11-2026.</b> Today is 28-10-2026, so we have
+        <b>5 days</b>, of which realistically ~3.5 are working days. The plan is
+        sized to that, not to an ideal two-week project.
+      </p>
+
+      <h2><span class="num">1</span>Definitions we commit to up front</h2>
+
+      <p>
+        The grader will ask “how did you define popularity?” and “how did you
+        define a small creator?” These are the pre-registered answers.
+      </p>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Concept</th>
+              <th>Operationalisation</th>
+              <th>Why</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>Positive interaction</b></td>
+              <td>
+                <code>rating &gt;= 4</code> → positive. Below →
+                <b>unobserved</b>, not negative. Positive fraction reported.
+              </td>
+              <td>
+                A 4- or 5-star review is what "the user liked it" means, so the
+                threshold is stated as 4 rather than as a fractional cut-off.
+                The card types <code>rating</code> as <code>float</code> and
+                never states the value set, so the loader logs the observed
+                distribution instead of assuming integers. The positive fraction
+                is reported because a skewed scale can make the threshold nearly
+                vacuous.
+              </td>
+            </tr>
+            <tr>
+              <td><b>Item popularity</b></td>
+              <td>
+                <b>Interaction mass over the catalogue</b>, not item
+                percentiles: <code>head</code> = items covering the first
+                <b>50%</b> of catalogue train interactions, <code>mid</code> =
+                next <b>30%</b>, <code>tail</code> = last <b>20%</b>.
+              </td>
+              <td>
+                Item counts tie heavily at 1–2 interactions, so “top 1% of
+                items” lands inside a tie block and is arbitrary. Mass buckets
+                are stable and directly express the claim “a few items take half
+                the signal”.
+              </td>
+            </tr>
+            <tr>
+              <td><b>Catalogue</b></td>
+              <td>
+                Items with <code>&gt;= 3</code> train interactions. Trained on,
+                never recommended. Sensitivity at 1 and 5.
+              </td>
+              <td>
+                An item with one interaction gets a near-random factor, which
+                would inflate coverage and Gini with noise — flattering our own
+                numbers.
+              </td>
+            </tr>
+            <tr>
+              <td><b>Seller size</b></td>
+              <td>
+                Primary: <code>store_n_items</code> — <b>catalogue</b> items per
+                store. <code>large</code> = stores covering the first 80% of
+                catalogue items, <code>small</code> the last 20% (a mass rule;
+                most stores hold 1–3 items, so a store percentile lands in a tie
+                block). Secondary: <code>store_n_train</code>. Null store rate
+                reported.
+              </td>
+              <td>
+                A real seller identity, not a proxy. Counting over catalogue
+                items means dead listings don’t inflate a store, and item count
+                gives a natural parity benchmark (exposure share ÷ catalogue
+                share). Interaction count is collinear with popularity, so it is
+                secondary.
+              </td>
+            </tr>
+            <tr>
+              <td><b>Exposure</b></td>
+              <td>
+                Fraction of all recommendation slots an item/bucket receives.
+                Reported as <b>parity</b> (exposure share ÷ item share) as well
+                as raw share.
+              </td>
+              <td>
+                Directly measures what the recommender shows. Parity makes “2%
+                of items take 5% of slots” readable as a number.
+              </td>
+            </tr>
+            <tr>
+              <td><b>Long-tail coverage</b></td>
+              <td>
+                Fraction of <b>catalogue</b> items appearing in at least one
+                user’s top-K, plus Gini over exposure counts and mean
+                recommended popularity.
+              </td>
+              <td>
+                Standard coverage, with the denominator being the recommendable
+                catalogue rather than all items.
+              </td>
+            </tr>
+            <tr>
+              <td><b>User relevance</b></td>
+              <td>
+                NDCG@10 and HitRate@10 on the temporal held-out item.
+                <code>recall@10</code> is <b>not</b> reported separately.
+              </td>
+              <td>
+                With one test item per user,
+                <code>recall@10 == hitrate@10</code> identically; reporting both
+                would look like two results. NDCG is position-aware and is what
+                the re-ranker costs.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Split and populations</h3>
+
+      <p>
+        <b>Split:</b> temporal leave-last-out per user — the
+        <b>last positive</b> (<code>rating &gt;= 4</code>) → <code>test</code>,
+        all earlier positives → <code>train</code>, ties broken
+        deterministically. <b>Nothing is dropped at prepare time</b>; ALS trains
+        on every user and item with at least one positive.
+      </p>
+
+      <p>
+        Two <b>views</b> are applied downstream, because exposure and relevance
+        need different things:
+      </p>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Population</th>
+              <th>Rule</th>
+              <th>Why it is separate</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>Exposure pop</b></td>
+              <td>users with <code>&gt;= 1</code> train positive</td>
+              <td>
+                Exposure needs no ground truth, so the catalogue-level claim
+                runs on the broad population.
+              </td>
+            </tr>
+            <tr>
+              <td><b>Relevance pop</b></td>
+              <td>users with <code>&gt;= 2</code> train positives</td>
+              <td>
+                NDCG/HitRate need a held-out item and a plausible history.
+                Reporting exposure here too shows whether the restriction shifts
+                the picture.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>
+        <b>Candidates:</b> catalogue items minus
+        <b>every item the user has already rated</b>, including low-rated ones —
+        a rated item is observed, not a recommendation opportunity. Test items
+        outside the catalogue are excluded, and the dropped fraction is reported
+        in the funnel.
+      </p>
+
+      <div class="callout">
+        <p>
+          <b>Why there is no minimum-interaction filter.</b> Filtering users
+          keeps only the heaviest, least representative ones, and filtering
+          items deletes the very tail we are claiming to protect — biasing the
+          catalogue <em>toward</em> our own finding before the model is ever
+          trained. ALS tolerates sparse rows, so training loses nothing by
+          keeping them; the populations and catalogue are defined as downstream
+          views instead. A <code>results/prepare_funnel.json</code> records
+          every stage so a reader can see how much tail actually existed.
+        </p>
+      </div>
+
+      <h2><span class="num">2</span>Pipeline</h2>
+
+      <p>
+        Six stages, each a script plus its artefacts. Stages 01–05 are the
+        pipeline; 06 is the sensitivity check that runs off stage 04's output.
+      </p>
+
+      <pre class="flow">
+01_prepare.py   Electronics -> no drops, temporal split, catalogue flag,
+                interaction-mass + store-footprint buckets, funnel report
+02_train.py     implicit ALS on all positives -> factors + top-200 candidates
+03_evaluate.py  per population: NDCG/HR, exposure, parity, exposure_by_cross
+                (store x popularity control), coverage, Gini;
+                MostPop + Random baselines
+04_rerank.py    z-scored popularity penalty over candidates, lambda sweep
+05_sensitivity.py  γ-weighted debiased NDCG/Recall as a cost sensitivity check
+                (runs off 04's output; feeds the report's upper-bound section)
+06_report.py    tables + figures + before/after, reads only results/*
+                (figures/ feeds report/results.ipynb and report/REPORT.md)
+                (figures/ feeds report/results.ipynb and report/REPORT.md)</pre
+      >
+
+      <h3>Key design decisions</h3>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Decision</th>
+              <th>What it is</th>
+              <th>Why</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>Train broad, evaluate narrow</b></td>
+              <td>
+                ALS trains on every user and item with ≥1 positive. Exposure
+                measured on users with ≥1 train positive; relevance on users
+                with ≥2.
+              </td>
+              <td>
+                A user with one interaction still informs item factors, so
+                filtering costs model quality for no benefit. Separating the
+                populations lets the catalogue claim be made on the broad base
+                without pretending the relevance metrics are measured there.
+              </td>
+            </tr>
+            <tr>
+              <td><b>Candidate generation first</b></td>
+              <td>
+                Re-ranker permutes the top-<b>200</b> ALS candidates. It may not
+                introduce new items — asserted as a hard invariant.
+              </td>
+              <td>
+                Isolates the exposure intervention from the relevance model, so
+                the delta is attributable to the re-ranker alone. 200 rather
+                than 50 because a tight candidate set caps the achievable
+                exposure change and can make a sweep look flat for the wrong
+                reason.
+              </td>
+            </tr>
+            <tr>
+              <td><b>Z-scored penalty</b></td>
+              <td>
+                <code>final = z(score) − λ · z(log1p(pop))</code>, both
+                standardised within each user’s candidate list. λ ∈ {0, 0.1,
+                0.25, 0.5, 1, 2}.
+              </td>
+              <td>
+                ALS scores have arbitrary scale, so a fixed λ against raw scores
+                trades an unknown amount of rank. Z-scoring makes λ readable as
+                standard deviations per standard deviation. λ = 0 is an exact
+                no-op, giving a clean before/after curve in one plot.
+              </td>
+            </tr>
+            <tr>
+              <td><b>Two baselines, in the critical path</b></td>
+              <td>
+                MostPop (sorted count vector) and Random (uniform sample from
+                catalogue), both through the same evaluate function.
+              </td>
+              <td>
+                Cheap, and they make the cost interpretable: “we lost 0.004
+                NDCG” means nothing, “we lost 12% of ALS’s edge over Random”
+                means something. <b>Gate:</b> the relevance-cost claim is only
+                reported after confirming ALS beats MostPop on NDCG@10 for the
+                relevance population. If it does not, there is no edge to spend
+                and the cost sentence is replaced with that finding.
+              </td>
+            </tr>
+            <tr>
+              <td><b>Seller control built in</b></td>
+              <td>
+                <code>exposure_share_by_pop[pop_bucket][store_bucket]</code> —
+                store exposure <em>within</em> each popularity bucket.
+              </td>
+              <td>
+                If large sellers are still over-exposed among head items alone,
+                the seller effect is not merely popularity. One groupby on data
+                already present, and it is what makes the second claim
+                defensible.
+              </td>
+            </tr>
+            <tr>
+              <td><b>Save per-user arrays</b></td>
+              <td>
+                <code>results/per_user_metrics.parquet</code> with per-user
+                NDCG/hit per λ.
+              </td>
+              <td>
+                Costs nothing now; makes a paired bootstrap on the cost delta
+                ~15 lines whenever there is time. Bootstrap stays
+                <b>optional</b>; the γ-debiased sensitivity metric is owned work
+                (step 9 of the flow table) and is not.
+              </td>
+            </tr>
+            <tr>
+              <td><b>Seed and log everything</b></td>
+              <td>
+                Hyperparameters, library versions, per-user score std, funnel
+                counts → <code>results/run_manifest.json</code>.
+              </td>
+              <td>
+                The score std is needed to state the scale the penalty operated
+                at; the funnel is needed to interpret any exposure number.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <p>
+          <b
+            >Stated in the report regardless of whether we compute the
+            sensitivity metric:</b
+          >
+          the relevance cost is measured on observed interactions, which are
+          themselves popularity-biased — tail items are under-observed, so
+          penalising popular items is penalised by construction. The reported
+          cost is an <b>upper bound</b>, and the report says so rather than
+          presenting a confident-looking number.
+        </p>
+      </div>
+
+      <h2><span class="num">3</span>Work split</h2>
+
+      <p>
+        Vishanth owns data + evaluation. Avinash owns model + re-ranking.
+        Rithesh owns the dataset loader, consumed by <code>01_prepare.py</code>,
+        the integration test suite that guards the artefact boundaries, and all
+        documentation and packaging.
+      </p>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Workstream</th>
+              <th>Owner</th>
+              <th>Concrete deliverable</th>
+              <th>Due</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="num">A</td>
+              <td>
+                <strong>Data + evaluation code</strong> —
+                <code>01_prepare.py</code>, <code>03_evaluate.py</code>, metrics
+                library, store/popularity bucketing, exposure &amp; coverage
+                functions, unit tests
+              </td>
+              <td class="who">
+                Vishanth<br /><span class="dash">PES1UG24AM323</span>
+              </td>
+              <td>
+                Working data pipeline + evaluation scripts + tested metrics
+              </td>
+              <td class="due">Thu 29-10 EOD</td>
+            </tr>
+            <tr>
+              <td class="num">B</td>
+              <td>
+                <strong>Model + re-ranker</strong> — <code>02_train.py</code>,
+                <code>04_rerank.py</code>, λ sweep, candidate generation, the
+                MostPop/Random baselines in <code>03_evaluate.py</code>, and
+                <code>06_sensitivity.py</code> (γ-weighted debiased metrics)
+              </td>
+              <td class="who">
+                Avinash Julakatti<br /><span class="dash">PES1UG24AM347</span>
+              </td>
+              <td>ALS model + re-ranker + <code>results/*.json</code></td>
+              <td class="due">Fri 30-10 EOD</td>
+            </tr>
+            <tr>
+              <td class="num">C</td>
+              <td>
+                <strong>Loader + integration tests + docs</strong> —
+                <code>src/amazon_loader.py</code> (HF loading,
+                <code>store</code> extraction, JSONL streaming) —
+                <b>ships a small real slice first</b>, so A and B develop
+                against actual schemas while the full 44M-review pass runs,
+                <code>tests/test_integration.py</code> (schema guards on every
+                artefact boundary), then report, README, data card, notebook,
+                <code>06_report.py</code>, slides
+              </td>
+              <td class="who">
+                Rithesh<br /><span class="dash">PES1UG24AM064</span>
+              </td>
+              <td>
+                <code>amazon_loader.py</code> +
+                <code>test_integration.py</code> + report, README, data card,
+                notebook, figures
+              </td>
+              <td class="due">Sat 31-10 EOD</td>
+            </tr>
+            <tr>
+              <td class="num">D</td>
+              <td>
+                <strong>Demo video + rehearsal</strong>
+              </td>
+              <td class="who">All three</td>
+              <td>3-min video, in-class walkthrough</td>
+              <td class="due">Sun 01-11</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2><span class="num">4</span>Day by day</h2>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Day</th>
+              <th>A — Vishanth (data / metrics)</th>
+              <th>B — Avinash (model / re-rank)</th>
+              <th>C — Rithesh (loader / tests / docs)</th>
+              <th>Checkpoint</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="due"><b>Wed 28</b><br />(today)</td>
+              <td>
+                Interface freeze: agree metric signatures + artefact schemas.
+                Repo skeleton, <code>.gitignore</code>,
+                <code>requirements.txt</code>, README stub.
+              </td>
+              <td>Agree embedding artefact format + candidate-set contract.</td>
+              <td>
+                Sign off the <code>amazon_loader.py</code> signature with
+                Vishanth. README architecture diagram, report skeleton, data
+                card draft.
+              </td>
+              <td><b>Interface contract signed off tonight.</b></td>
+            </tr>
+            <tr>
+              <td class="due"><b>Thu 29</b></td>
+              <td>
+                <code>01_prepare.py</code> (Amazon loader + split + store
+                buckets); <code>03_evaluate.py</code> against
+                <code>src/metrics.py</code>.
+              </td>
+              <td>
+                <code>02_train.py</code> — ALS fit against the frozen schema;
+                timing run on cloud. <code>06_sensitivity.py</code> only if
+                Thursday finished early; otherwise the report's upper-bound
+                paragraph stands without it.
+              </td>
+              <td>
+                <b><code>src/amazon_loader.py</code> merged</b> (loader +
+                <code>store</code> extraction),
+                <code>tests/test_integration.py</code> covering the
+                <code>ratings.parquet</code> /
+                <code>items.parquet</code> schemas. Report §1–§2 (intro, related
+                work, definitions).
+              </td>
+              <td>Loader merged; A’s metrics verified on toy data.</td>
+            </tr>
+            <tr>
+              <td class="due"><b>Fri 30</b></td>
+              <td>
+                First full metrics numbers from the cloud run →
+                <code>results/baseline_metrics.json</code>.
+              </td>
+              <td>
+                <code>04_rerank.py</code> + λ sweep →
+                <code>results/rerank_sweep.json</code>.
+              </td>
+              <td>
+                <code>test_integration.py</code> extended to
+                <code>baseline_scores.parquet</code>; report §3 (method, from V
+                and A’s notes); <code>06_report.py</code> plotting code written.
+              </td>
+              <td><b>Baseline + first re-rank numbers exist.</b></td>
+            </tr>
+            <tr>
+              <td class="due freeze"><b>Sat 31</b></td>
+              <td>
+                Sanity-check numbers and edge cases; co-sign data card with
+                Rithesh.
+              </td>
+              <td>
+                Full λ curve reported, one operating point named as an
+                illustration; final run, all artefacts in <code>results/</code>.
+              </td>
+              <td>
+                Integration suite green on final artefacts; notebook executed,
+                report §4–§5 (results, loss in relevance, limitations), README
+                setup steps, data card final.
+              </td>
+              <td>
+                <b class="freeze">Results freeze.</b> No more code changes that
+                alter numbers.
+              </td>
+            </tr>
+            <tr>
+              <td class="due"><b>Sun 01</b></td>
+              <td class="dash">—</td>
+              <td class="dash">—</td>
+              <td class="dash">—</td>
+              <td><b>Demo video + rehearsal, zip built.</b></td>
+            </tr>
+            <tr>
+              <td class="due"><b>Mon 02</b></td>
+              <td class="dash">—</td>
+              <td class="dash">—</td>
+              <td class="dash">—</td>
+              <td><b>Present.</b></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <p>
+          <b>Hard rule:</b> Saturday is a <em>results freeze</em>. Sunday is
+          packaging and rehearsal only. Anything not working by Saturday EOD is
+          dropped from the report rather than fixed.
+        </p>
+      </div>
+
+      <h2>
+        <span class="num">5</span>Complete execution flow — file by file, in
+        order
+      </h2>
+
+      <p>
+        This is the sequence of files worked on, top to bottom. Each row says
+        which file, who touches it, what it produces, and what must exist before
+        it can start. Read this as the actual build order.
+      </p>
+
+      <p>
+        <b>Only rows 0–2 will exist today</b> — the contract, the metrics
+        library and its tests. Rows 3 onward are scheduled work:
+        <code>scripts/</code> is empty apart from a <code>.gitkeep</code>, and
+        no result artefact has been produced yet. Nothing downstream of the
+        contract has been written, which is why the metric functions are
+        unit-tested before any data lands. (havent pushed these yet, I(Vishanth)
+        will do soon)
+      </p>
+
+      <div class="table-scroll">
+        <table class="flow">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>File</th>
+              <th>Owner</th>
+              <th>Produces</th>
+              <th>Blocked until</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="done">
+              <td class="num">0</td>
+              <td><code>report/INTERFACE.md</code></td>
+              <td class="who">Vishanth</td>
+              <td>Frozen schemas + metric signatures</td>
+              <td class="dash">— <em>28-10 EOD</em></td>
+            </tr>
+            <tr class="done">
+              <td class="num">1</td>
+              <td><code>src/metrics.py</code></td>
+              <td class="who">Vishanth</td>
+              <td>Six metric functions + store-exposure, stdlib only</td>
+              <td class="dash">—<em> 28-10 EOD</em></td>
+            </tr>
+            <tr class="done">
+              <td class="num">2</td>
+              <td><code>tests/test_metrics.py</code></td>
+              <td class="who">Vishanth</td>
+              <td>52 passing tests, hand-computed values</td>
+              <td class="dash">— <em>28-10 EOD</em></td>
+            </tr>
+            <tr>
+              <td class="num">3</td>
+              <td><code>src/amazon_loader.py</code></td>
+              <td class="who">Rithesh</td>
+              <td>
+                Frozen loader API: <code>load_reviews()</code>,
+                <code>load_metadata()</code>, <code>extract_store()</code>
+              </td>
+              <td>Interface contract §1</td>
+            </tr>
+            <tr>
+              <td class="num">4</td>
+              <td><code>scripts/01_prepare.py</code></td>
+              <td class="who">Vishanth</td>
+              <td>
+                <code>data/processed/ratings.parquet</code>,
+                <code>items.parquet</code>
+              </td>
+              <td>Steps 0 + 3</td>
+            </tr>
+            <tr>
+              <td class="num">5</td>
+              <td><code>tests/test_integration.py</code></td>
+              <td class="who">Rithesh</td>
+              <td>
+                Schema guards on <code>ratings</code> +
+                <code>items</code> artefacts
+              </td>
+              <td>Step 4 output on cloud</td>
+            </tr>
+            <tr>
+              <td class="num">6</td>
+              <td><code>scripts/02_train.py</code></td>
+              <td class="who">Avinash</td>
+              <td>
+                ALS model pickle + <code>results/baseline_scores.parquet</code>
+              </td>
+              <td>Step 3 output on cloud</td>
+            </tr>
+            <tr>
+              <td class="num">7</td>
+              <td><code>scripts/03_evaluate.py</code></td>
+              <td class="who">
+                Vishanth<br /><span class="dash">baselines: Avinash</span>
+              </td>
+              <td><code>results/baseline_metrics.json</code></td>
+              <td>Steps 1 + 6</td>
+            </tr>
+            <tr>
+              <td class="num">8</td>
+              <td><code>scripts/04_rerank.py</code></td>
+              <td class="who">Avinash</td>
+              <td><code>results/rerank_sweep.json</code></td>
+              <td>Steps 1 + 6 + 7</td>
+            </tr>
+            <tr>
+              <td class="num">9</td>
+              <td><code>scripts/05_sensitivity.py</code></td>
+              <td class="who">Avinash</td>
+              <td>
+                <code>results/sensitivity.json</code> — γ-weighted debiased
+                NDCG/Recall
+              </td>
+              <td>Steps 1 + 7 + 8</td>
+            </tr>
+            <tr>
+              <td class="num">10</td>
+              <td><code>scripts/06_report.py</code></td>
+              <td class="who">Rithesh</td>
+              <td><code>figures/*.png</code> — before/after plots</td>
+              <td>Steps 7 + 8 + 9</td>
+            </tr>
+            <tr>
+              <td class="num">11</td>
+              <td><code>report/results.ipynb</code></td>
+              <td class="who">Rithesh</td>
+              <td>Executed notebook with tables + figures</td>
+              <td>Step 10</td>
+            </tr>
+            <tr>
+              <td class="num">12</td>
+              <td><code>report/REPORT.md</code> (→ PDF)</td>
+              <td class="who">
+                Rithesh <span class="dash">(tech review: V + A)</span>
+              </td>
+              <td>3–5 page technical report</td>
+              <td>Skeleton day 1; numbers after step 11</td>
+            </tr>
+            <tr>
+              <td class="num">13</td>
+              <td><code>report/DATA_CARD.md</code></td>
+              <td class="who">Vishanth + Rithesh</td>
+              <td>Dataset card (Amazon Reviews 2023)</td>
+              <td>Step 4</td>
+            </tr>
+            <tr>
+              <td class="num">14</td>
+              <td><code>README.md</code></td>
+              <td class="who">
+                Rithesh <span class="dash">(setup steps: V)</span>
+              </td>
+              <td>Architecture diagram, setup, run order</td>
+              <td>Steps 3–10 for accuracy</td>
+            </tr>
+            <tr>
+              <td class="num">15</td>
+              <td><code>demo/</code> + video</td>
+              <td class="who">All three</td>
+              <td>3-min demo, slides</td>
+              <td>Everything above</td>
+            </tr>
+            <tr>
+              <td class="num">16</td>
+              <td><code>submission.zip</code></td>
+              <td class="who">Vishanth</td>
+              <td>
+                Final zip checked against <code>submission_format.md</code>
+              </td>
+              <td>Step 14</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>The dependency chain, visually</h3>
+      <pre class="chain"><code>metrics.py ──┐
+             ├──▶ 03_evaluate.py ──┐
+01_prepare.py ──▶ 02_train.py ─────┴──▶ baseline_metrics.json ──┐
+                                                              ├──▶ 06_report.py ──▶ notebook ──▶ REPORT.md
+01_prepare.py ──▶ 02_train.py ──▶ 04_rerank.py ───────────────┘</code></pre>
+
+      <div class="callout">
+        <p>
+          <b>Critical path:</b> <code>01_prepare.py</code> →
+          <code>02_train.py</code> → <code>04_rerank.py</code> →
+          <code>06_report.py</code>. Every hour lost on step 3 or 4 is an hour
+          lost on the report. Steps 9, 11 and 12 can absorb delay; steps 3–6
+          cannot.
+        </p>
+      </div>
+
+      <h2><span class="num">6</span>Interface contract — frozen tonight</h2>
+
+      <p>
+        <b><code>report/INTERFACE.md</code> is the contract.</b> This section
+        summarises it so the plan is readable on its own; where the two differ,
+        the file wins. These are the exact shapes everyone codes against, and
+        the reason the three workstreams can run in parallel without integration
+        pain.
+      </p>
+
+      <h3>Data artefacts — <code>01_prepare.py</code></h3>
+      <pre><code>data/processed/ratings.parquet
+  userId:str, itemId:str, rating:float32, timestamp:int64,
+  split:str('train'|'test'|'seen'), seen:bool
+  # itemId = parent_asin; split='seen' holds every non-positive rating and
+  # is used only to exclude already-rated items from candidates
+
+data/processed/items.parquet
+  itemId:str, title:str, store:str, main_category:str, price:float32,
+  n_train_ratings:int32, popularity_rank:int32, pop_bucket:str('head'|'mid'|'tail'),
+  store_n_items:int32, store_n_train:int32,
+  store_bucket:str('small'|'large'|'unknown'), in_catalogue:bool</code></pre>
+
+      <p>
+        <b>Both bucket rules are mass rules, not percentiles</b> — item counts
+        tie heavily at 1–2 and store counts at 1–3, so any percentile cut-off
+        lands inside a tie block. <code>pop_bucket</code>: <code>head</code> =
+        items covering the first 50% of catalogue train interactions,
+        <code>mid</code> the next 30%, <code>tail</code> the last 20%.
+        <code>store_bucket</code>: <code>large</code> = stores covering the
+        first 80% of catalogue items, <code>small</code> the last 20%,
+        <code>unknown</code> for missing <code>store</code> — reported
+        separately, never folded into either. Every exposure table carries item
+        share and interaction share per bucket.
+      </p>
+
+      <h3>Model and result artefacts</h3>
+      <pre><code>results/model/als_factors.npz
+  item_factors, user_factors            # full catalogue, no sampled negatives
+
+# Evaluation is FULL-RANKING. ALS scores every catalogue item for each user and
+# the top-200 are taken from that complete ordering. No negatives are sampled for
+# training or evaluation, so NDCG/HitRate are not conditional on a sampled subset.
+
+results/baseline_scores.parquet
+  userId:str, itemId:str, score:float32, rank:int16   # top-200 per user
+
+results/run_manifest.json
+  seed, params (factors, alpha, k, n_candidates, n_eval_users, thresholds),
+  package versions, git commit, counts
+
+results/prepare_funnel.json
+  stages[] raw -> positives -> after_split -> non_positives_seen ->
+  catalogue_ge_3 -> eval_exposure_pop -> eval_relevance_pop;
+  positive_fraction, store_null_rate, test_items_outside_catalogue_frac,
+  buckets{head,mid,tail}: {n_items, item_share, interaction_share}
+
+results/baseline_metrics.json    # keyed by exposure_pop / relevance_pop
+results/rerank_sweep.json        # keyed by population, list ascending in lambda
+results/sensitivity.json         # keyed by population, gamma-weighted metrics
+results/rerank_scores_lambda_&lt;L&gt;.parquet
+results/per_user_metrics.parquet # userId, population, lambda, ndcg, hit</code></pre>
+
+      <p>
+        <b>Two populations, sampled.</b> Exposure = users with
+        <code>&gt;= 1</code> train positive; relevance = users with
+        <code>&gt;= 2</code>. Each is a fixed-seed random sample of
+        <code>n_eval_users = 300000</code>, sorted by <code>userId</code> before
+        the draw so the result is order-independent; the seed is in
+        <code>run_manifest.json</code>. Without the cap, 200 candidates ×
+        millions of users makes
+        <code>baseline_scores.parquet</code> unmanageable and multiplies
+        per-user metrics by six <code>lambda</code> values. Both populations
+        carry exposure tables, so we can see whether the
+        <code>&gt;= 2</code> restriction shifts the picture.
+      </p>
+
+      <p>
+        <b><code>recall</code> is not reported.</b> With one test item per user,
+        <code>recall@10 == hitrate@10</code> identically; reporting both would
+        look like two results. <code>baseline_metrics.json</code> carries NDCG,
+        HitRate, exposure shares, exposure parity, the store × popularity
+        cross-tab, coverage, Gini and mean recommended popularity, plus MostPop
+        and Random baseline rows.
+      </p>
+
+      <h3>Metric functions — <code>src/metrics.py</code></h3>
+      <pre><code>def ndcg_at_k(recs, relevant, k) -&gt; float
+def recall_at_k(recs, relevant, k) -&gt; float
+def hitrate_at_k(recs, relevant, k) -&gt; float
+def exposure_share(recs_all, pop_bucket_of, buckets=('head','mid','tail')) -&gt; dict
+def catalog_coverage(recs_all, catalog_size) -&gt; float
+def gini(values) -&gt; float
+def exposure_parity(exposure, item_share, buckets=('head','mid','tail')) -&gt; dict
+def exposure_by_cross(recs_all, pop_bucket_of, store_bucket_of) -&gt; dict
+def mean_recommended_popularity(recs_all, popularity_of) -&gt; float</code></pre>
+
+      <p>
+        Stdlib only, no numpy or pandas, so the same functions run in unit tests
+        and in the pipeline. Each is unit-tested against a hand-computed toy
+        example with a
+        <b>known expected value</b> — 52 tests today — so A’s code can be
+        trusted before any real data lands.
+      </p>
+
+      <h2><span class="num">7</span>Next steps once approved</h2>
+      <ol>
+        <li>
+          Write the interface contract into <code>report/INTERFACE.md</code> so
+          all three have it in the repo.
+        </li>
+        <li>
+          Repo skeleton: <code>.gitignore</code> (<code>data/</code>,
+          <code>results/</code>, <code>.venv/</code>),
+          <code>requirements.txt</code>, <code>README.md</code> stub, and
+          <code>src/metrics.py</code> with the six functions
+          <b>plus their unit tests against toy fixtures</b> — the one piece that
+          can be fully verified locally with plain Python, no pandas, no data.
+        </li>
+        <li>The team then splits per section 3 and starts Thursday.</li>
+      </ol>
+
+      <h2><span class="num">8</span>Submission deliverables</h2>
+
+      <p>
+        The submission requires six artefacts. Each has one owner and a slot in
+        the schedule above; none is left implicit.
+      </p>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Deliverable</th>
+              <th>Where</th>
+              <th>Owner</th>
+              <th>Built by</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>README</b> with architecture diagram and setup</td>
+              <td><code>README.md</code></td>
+              <td class="who">Rithesh</td>
+              <td>Diagram present; setup steps finalised Sat 31</td>
+            </tr>
+            <tr>
+              <td><b>Reproducible pipeline</b></td>
+              <td>
+                <code>scripts/01_prepare.py</code> … <code>06_report.py</code>
+              </td>
+              <td class="who">Vishanth + Avinash</td>
+              <td>Stages 01–05, each independently runnable</td>
+            </tr>
+            <tr>
+              <td><b>Results notebook</b></td>
+              <td>
+                <code>report/results.ipynb</code> — executed, reading only
+                <code>results/*</code>
+              </td>
+              <td class="who">Rithesh</td>
+              <td>
+                Written Fri 30 against <code>06_report.py</code> outputs;
+                executed Sat 31
+              </td>
+            </tr>
+            <tr>
+              <td><b>Technical report</b>, 3–5 pages</td>
+              <td><code>report/REPORT.md</code></td>
+              <td class="who">All three</td>
+              <td>§1–§2 Thu, §3 Fri, §4–§5 Sat</td>
+            </tr>
+            <tr>
+              <td><b>Data card</b></td>
+              <td>
+                <code>report/DATA_CARD.md</code> — licence, provenance, known
+                gaps, <code>store</code> null rate
+              </td>
+              <td class="who">Rithesh, co-signed Vishanth</td>
+              <td>Drafted Wed 28; final Sat 31</td>
+            </tr>
+            <tr>
+              <td><b>Demo video</b>, 3 min</td>
+              <td>Evaluated in class</td>
+              <td class="who">All three</td>
+              <td>Recorded Sun 01</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <p>
+          <b>The data card is not optional.</b> The assignment brief requires
+          every dataset used to be recorded in a datasheet or data card inside
+          the submission, and <code>report/DATASET_FACTS.md</code> already holds
+          the primary-source notes it is built from — including the two facts
+          that bound the seller claim: <code>store</code> is a storefront label
+          rather than a seller id, and its null rate decides how strong that
+          result can be.
+        </p>
+      </div>
+
+      <h2><span class="num">9</span>Decisions and their status</h2>
+
+      <p>
+        <b>None of this is beyond revision.</b> Rows marked
+        <span class="tag ok">settled</span> are factual or clearly correct. Rows
+        marked <span class="tag open">under review</span> are working defaults
+        that real data may overturn — written down so we can code against
+        something, not because they are proven. A row moves to
+        <em>settled</em> only when a number from a real run settles it, and that
+        number is recorded beside the row.
+      </p>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Decision</th>
+              <th>Status</th>
+              <th>Current choice</th>
+              <th>What would change it</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Dataset</strong></td>
+              <td><span class="tag ok">settled</span></td>
+              <td>
+                <strong>Amazon Reviews 2023</strong> — real
+                <code>store</code> field, so “large sellers” is measured, not
+                proxied
+              </td>
+              <td>
+                Nothing. This is what makes the seller half of the question
+                answerable at all.
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Category</strong></td>
+              <td><span class="tag open">under review</span></td>
+              <td>
+                <strong>Electronics</strong> — 43.9M ratings / 1.6M items /
+                <b>27.4 ratings per item</b>
+              </td>
+              <td>
+                Books has 6.7 ratings/item, so any item filter deletes most of
+                its catalogue and keeps the popular survivors. Electronics keeps
+                far more tail alive. Confirm on the Thursday funnel: if
+                Electronics survives poorly too, reconsider.
+              </td>
+            </tr>
+            <tr>
+              <td><strong>MF model</strong></td>
+              <td><span class="tag ok">settled</span></td>
+              <td><code>implicit</code> ALS, implicit-feedback framing</td>
+              <td>Nothing. Binarisation is a separate row.</td>
+            </tr>
+            <tr>
+              <td><strong>Positive threshold</strong></td>
+              <td><span class="tag def">defined</span></td>
+              <td>
+                <code>rating &gt;= 4</code>. Below is <em>unobserved</em>, not
+                negative.
+              </td>
+              <td>
+                Report the positive fraction. If it is ~90%, the threshold is
+                close to "reviewed at all" and the report should say so rather
+                than implying a quality filter.
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Filters</strong></td>
+              <td><span class="tag ok">settled</span></td>
+              <td>
+                <b>No user or item filter at prepare time.</b> Populations and
+                catalogue are downstream views.
+              </td>
+              <td>
+                Any minimum-interaction filter would keep only heavy users and
+                delete the tail we claim to protect, biasing the catalogue
+                toward our own finding. The funnel reports what each view
+                retains.
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Split</strong></td>
+              <td><span class="tag def">defined</span></td>
+              <td>Temporal leave-last-out per user</td>
+              <td>
+                Correct method. Known limitation to state: other users’ future
+                interactions remain in training.
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Populations</strong></td>
+              <td><span class="tag def">defined</span></td>
+              <td>
+                Exposure pop = ≥1 train positive; relevance pop = ≥2; catalogue
+                = ≥3 train interactions
+              </td>
+              <td>
+                Thresholds are sensitivity-tested at 1/3/5. If the funnel shows
+                the relevance pop collapses, the thresholds move and the report
+                says why.
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Popularity buckets</strong></td>
+              <td><span class="tag ok">settled</span></td>
+              <td>
+                Interaction mass: head 50%, mid 30%, tail 20% of catalogue
+                interactions
+              </td>
+              <td>
+                Percentile-of-items was not defensible — counts tie heavily at
+                1–2. Report item share and interaction share per bucket.
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Seller size</strong></td>
+              <td><span class="tag open">under review</span></td>
+              <td>
+                Primary: <code>store_n_items</code> (catalogue footprint).
+                Secondary: <code>store_n_train</code>. Null store rate reported.
+                <b>Unvalidated:</b> the bucket is a mass rule (large = stores
+                covering the first 80% of catalogue items), so if one store
+                dominates the catalogue, <code>large</code> collapses to a
+                single seller. Funnel reports <code>n_stores</code> per bucket;
+                if <code>large</code> is tiny the rule switches to a fixed
+                percentile.
+              </td>
+              <td>
+                The <code>store</code> null rate decides how strong this claim
+                can be — check it Thursday. The bucket boundary is the second
+                gate: a degenerate split makes the parity ratio meaningless, so
+                the funnel's <code>n_stores</code> is read before any exposure
+                number. Remaining confound is bulk listing, which is arguably
+                part of what “large seller” means.
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Top-K</strong></td>
+              <td><span class="tag def">defined</span></td>
+              <td><code>N = 200</code> candidates; metrics at @10</td>
+              <td>
+                The re-ranker can only reorder what it is given, so a tight
+                candidate set caps the exposure change.
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Re-ranker scale</strong></td>
+              <td><span class="tag def">defined</span></td>
+              <td>
+                Both terms z-scored per user; λ ∈ {0, 0.1, 0.25, 0.5, 1, 2}
+              </td>
+              <td>
+                Record the observed per-user score std. If the curve is still
+                flat, the grid moves and the report shows the scale.
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Cloud credits</strong></td>
+              <td><span class="tag ok">settled</span></td>
+              <td>Available on demand</td>
+              <td>
+                Still run the Thursday timing check; subsample only if a full
+                ALS fit exceeds ~40&nbsp;min.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <p>
+          <b>Optional, explicitly off the critical path:</b> bootstrap
+          confidence intervals. The γ-weighted debiased sensitivity metric is
+          scheduled work, not optional — it is the evidence that the reported
+          cost is an upper bound. The upper-bound limitation is stated in the
+          report either way.
+        </p>
+      </div>
+
+      <footer class="page">
+        Exposure Bias in Large Recommenders — mini-project plan · PES1UG24AM323
+        · PES1UG24AM347 · PES1UG24AM064
+      </footer>
+    </div>
+  </body>
+</html>

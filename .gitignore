@@ -4,11 +4,12 @@ data/raw/
 data/processed/
 data/*.zip
 
-# Generated results, figures & scratch
+# Generated results & scratch (figures/ is committed: the report and notebook embed it)
 results/
+results_b/
+figures_b/
+logs_b/
 scratch/
-figures/*.png
-figures/*.pdf
 *.npz
 *.parquet
 *.pkl
